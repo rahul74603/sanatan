@@ -1,0 +1,43 @@
+# Environment variables
+.env
+*.env
+
+# Credentials
+credentials.json
+spiritual-service-account.json
+service-account*.json
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Data
+data/posted_history.json
+# Local Database
+*.db
+divine_poster.db
+
+# Test files
+test_*.py
+test_*.jpg
+test_*.png
