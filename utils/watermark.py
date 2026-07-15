@@ -1,18 +1,27 @@
 """
-Watermark/Branding Utility - ANTI-CROP EDITION
+Watermark/Branding Utility - ANTI-CROP EDITION + VIDEO SUPPORT
 Multi-layer protection so watermark survives even after cropping.
 
-Strategy:
+Strategy for IMAGES:
 - Diagonal repeating watermark across entire image (unremovable)
 - Center subtle signature
 - Multiple corner signatures
 - Micro signatures scattered
 - Never bottom-only (chor log crop kar dete hain)
+
+🆕 V2 UPDATE: Added video watermarking via FFmpeg
+- apply_video_branding() for MP4 videos
+- Supports bottom-right corner watermark
+- Optional diagonal pattern for stronger protection
 """
+import os
+import io
+import math
+import subprocess
+import tempfile
+from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont, ImageEnhance
 from io import BytesIO
-import os
-import math
 from utils.logger import get_logger
 
 logger = get_logger("watermark")
@@ -65,9 +74,11 @@ DEFAULT_STRATEGY = "balanced"
 
 # Font paths (Hindi support priority)
 FONT_PATHS = [
-    "C:/Windows/Fonts/NirmalaUI.ttf",       # ✅ Hindi
-    "C:/Windows/Fonts/mangal.ttf",          # ✅ Hindi
-    "C:/Windows/Fonts/NirmalaB.ttf",        # ✅ Hindi Bold
+    "fonts/NotoSansDevanagari-Bold.ttf",     # ✅ Cross-platform (priority)
+    "fonts/NotoSansDevanagari-Regular.ttf",  # Fallback
+    "C:/Windows/Fonts/NirmalaUI.ttf",       # ✅ Hindi Windows
+    "C:/Windows/Fonts/mangal.ttf",          # ✅ Hindi Windows
+    "C:/Windows/Fonts/NirmalaB.ttf",        # ✅ Hindi Bold Windows
     "C:/Windows/Fonts/Arial.ttf",
     "C:/Windows/Fonts/calibrib.ttf",
     "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf",
@@ -339,7 +350,7 @@ def _add_micro_signatures(
 
 
 # ============================================================
-# MAIN BRANDING FUNCTION
+# MAIN BRANDING FUNCTION (IMAGES)
 # ============================================================
 
 def apply_branding(
@@ -432,7 +443,7 @@ def apply_branding(
 
 
 # ============================================================
-# CONVENIENCE FUNCTIONS
+# CONVENIENCE FUNCTIONS (IMAGES)
 # ============================================================
 
 def add_maximum_protection(image_bytes: bytes) -> bytes:
@@ -451,16 +462,343 @@ def add_minimal_watermark(image_bytes: bytes) -> bytes:
 
 
 # ============================================================
+# 🆕 V2: VIDEO WATERMARKING (FFmpeg)
+# ============================================================
+
+def _check_ffmpeg() -> bool:
+    """Check if FFmpeg is installed and accessible"""
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-version"],
+            capture_output=True,
+            timeout=5
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def _create_watermark_png(
+    text: str = None,
+    width: int = 400,
+    opacity: int = 180
+) -> bytes:
+    """
+    🆕 Create transparent PNG watermark for video overlay.
+
+    Args:
+        text: Watermark text (default: handle)
+        width: Width in pixels
+        opacity: 0-255 (higher = more opaque)
+
+    Returns:
+        PNG bytes with transparent background
+    """
+    if text is None:
+        text = BRANDING["handle"]
+
+    # Create transparent image
+    img = Image.new("RGBA", (width, 80), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    # Load font
+    font_size = 32
+    font = _load_font(font_size)
+
+    # Measure text
+    bbox = draw.textbbox((0, 0), text, font=font)
+    text_w = bbox[2] - bbox[0]
+    text_h = bbox[3] - bbox[1]
+
+    # Center text with padding
+    padding = 20
+    x = padding
+    y = (80 - text_h) // 2
+
+    # Background pill (semi-transparent black)
+    pill_bg = [
+        x - 10, y - 5,
+        x + text_w + 10, y + text_h + 5
+    ]
+    draw.rounded_rectangle(
+        pill_bg,
+        radius=15,
+        fill=(0, 0, 0, min(opacity + 30, 220))
+    )
+
+    # Shadow
+    draw.text((x + 1, y + 1), text, font=font, fill=(0, 0, 0, 200))
+
+    # Main text (gold color)
+    draw.text((x, y), text, font=font, fill=(255, 215, 0, opacity))
+
+    # Save to bytes
+    output = BytesIO()
+    img.save(output, format="PNG")
+    return output.getvalue()
+
+
+def apply_video_branding(
+    input_video_path: str,
+    output_video_path: str = None,
+    strategy: str = "balanced",
+    position: str = "bottom-right"
+) -> str:
+    """
+    🆕 Apply watermark to video using FFmpeg.
+
+    Args:
+        input_video_path: Path to input video
+        output_video_path: Path to save watermarked video (auto-generated if None)
+        strategy: "maximum" | "balanced" | "minimal"
+        position: "bottom-right" | "bottom-left" | "top-right" | "top-left" | "center"
+
+    Returns:
+        Path to watermarked video
+
+    Notes:
+        - Requires FFmpeg installed and in PATH
+        - Falls back to returning original path if FFmpeg not available
+        - For 'maximum' strategy: uses diagonal pattern overlay (heavier processing)
+        - For 'balanced'/'minimal': just bottom-right corner watermark
+    """
+    input_path = Path(input_video_path)
+
+    if not input_path.exists():
+        raise FileNotFoundError(f"Video not found: {input_path}")
+
+    # Auto-generate output path if not provided
+    if output_video_path is None:
+        output_video_path = str(
+            input_path.parent / f"{input_path.stem}_watermarked{input_path.suffix}"
+        )
+
+    # ═══════════════════════════════════════════
+    # Check FFmpeg availability
+    # ═══════════════════════════════════════════
+    if not _check_ffmpeg():
+        logger.warning("⚠️  FFmpeg not found. Returning original video without watermark.")
+        return str(input_path)
+
+    logger.info("=" * 55)
+    logger.info("🎬 VIDEO WATERMARKING")
+    logger.info("=" * 55)
+    logger.info(f"   Input     : {input_path.name}")
+    logger.info(f"   Output    : {Path(output_video_path).name}")
+    logger.info(f"   Strategy  : {strategy}")
+    logger.info(f"   Position  : {position}")
+    logger.info("=" * 55)
+
+    # ═══════════════════════════════════════════
+    # Create watermark PNG
+    # ═══════════════════════════════════════════
+    strategy_config = STRATEGIES.get(strategy, STRATEGIES[DEFAULT_STRATEGY])
+    opacity = strategy_config["opacity"] * 4  # Convert to 0-255 range
+
+    watermark_png = _create_watermark_png(
+        text=BRANDING["handle"],
+        width=400,
+        opacity=min(opacity, 220)
+    )
+
+    # Save watermark to temp file (FFmpeg needs file path)
+    with tempfile.NamedTemporaryFile(
+        delete=False,
+        suffix='.png',
+        prefix='watermark_'
+    ) as f:
+        f.write(watermark_png)
+        watermark_path = f.name
+
+    logger.info(f"💾 Watermark PNG created: {len(watermark_png):,} bytes")
+
+    # ═══════════════════════════════════════════
+    # Build FFmpeg overlay position
+    # ═══════════════════════════════════════════
+    position_map = {
+        "bottom-right": "W-w-20:H-h-20",
+        "bottom-left":  "20:H-h-20",
+        "top-right":    "W-w-20:20",
+        "top-left":     "20:20",
+        "center":       "(W-w)/2:(H-h)/2",
+    }
+    overlay_position = position_map.get(position, position_map["bottom-right"])
+
+    # ═══════════════════════════════════════════
+    # FFmpeg command
+    # ═══════════════════════════════════════════
+
+    if strategy == "maximum":
+        # Maximum: Corner watermark + diagonal pattern (complex filter)
+        # For now, just do corner + additional overlay at different position
+        filter_complex = (
+            f"[1:v]scale=200:-1[wm1];"
+            f"[0:v][wm1]overlay={overlay_position}[v1];"
+            f"[1:v]scale=150:-1,format=rgba,colorchannelmixer=aa=0.3[wm2];"
+            f"[v1][wm2]overlay=(W-w)/2:H*0.35"
+        )
+    else:
+        # Balanced/Minimal: Just corner watermark
+        filter_complex = (
+            f"[1:v]scale=200:-1[wm];"
+            f"[0:v][wm]overlay={overlay_position}"
+        )
+
+    cmd = [
+        "ffmpeg",
+        "-y",  # Overwrite output
+        "-i", str(input_path),
+        "-i", watermark_path,
+        "-filter_complex", filter_complex,
+        "-codec:a", "copy",  # Copy audio without re-encoding (faster)
+        "-c:v", "libx264",
+        "-preset", "fast",
+        "-crf", "23",
+        "-movflags", "+faststart",
+        "-pix_fmt", "yuv420p",
+        output_video_path
+    ]
+
+    # ═══════════════════════════════════════════
+    # Run FFmpeg
+    # ═══════════════════════════════════════════
+    try:
+        import time
+        start_time = time.time()
+
+        logger.info(f"🎥 Running FFmpeg...")
+
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=300  # 5 min timeout
+        )
+
+        elapsed = round(time.time() - start_time, 2)
+
+        if result.returncode != 0:
+            logger.error(f"❌ FFmpeg failed:")
+            logger.error(result.stderr[-500:])  # Last 500 chars of error
+            raise Exception(f"FFmpeg exit code: {result.returncode}")
+
+        # Verify output file
+        output_path = Path(output_video_path)
+        if not output_path.exists():
+            raise Exception("Output file not created")
+
+        output_size = output_path.stat().st_size
+        input_size = input_path.stat().st_size
+
+        logger.info("=" * 55)
+        logger.info(f"✅ VIDEO WATERMARK APPLIED")
+        logger.info("=" * 55)
+        logger.info(f"   Time      : {elapsed}s")
+        logger.info(f"   Input     : {input_size/1024/1024:.2f} MB")
+        logger.info(f"   Output    : {output_size/1024/1024:.2f} MB")
+        logger.info(f"   Path      : {output_video_path}")
+        logger.info("=" * 55)
+
+        return output_video_path
+
+    except subprocess.TimeoutExpired:
+        logger.error("❌ FFmpeg timeout (>5 min)")
+        raise Exception("Video watermarking timeout")
+
+    except Exception as e:
+        logger.error(f"❌ Video watermarking failed: {e}")
+        # Return original if fails
+        return str(input_path)
+
+    finally:
+        # Cleanup temp watermark file
+        try:
+            os.remove(watermark_path)
+        except Exception:
+            pass
+
+
+def apply_video_branding_from_bytes(
+    video_bytes: bytes,
+    strategy: str = "balanced",
+    position: str = "bottom-right"
+) -> bytes:
+    """
+    🆕 Apply watermark to video bytes (convenience wrapper).
+
+    Saves bytes to temp file, watermarks, reads result back.
+
+    Args:
+        video_bytes: Video MP4 bytes
+        strategy: "maximum" | "balanced" | "minimal"
+        position: Corner position
+
+    Returns:
+        Watermarked video bytes
+    """
+    if not video_bytes:
+        raise ValueError("No video bytes provided")
+
+    # Save input to temp file
+    input_temp = tempfile.NamedTemporaryFile(
+        delete=False,
+        suffix='.mp4',
+        prefix='input_video_'
+    )
+    input_temp.write(video_bytes)
+    input_temp.close()
+
+    # Prepare output temp path
+    output_temp_path = input_temp.name.replace('.mp4', '_wm.mp4')
+
+    try:
+        # Apply watermark
+        result_path = apply_video_branding(
+            input_video_path=input_temp.name,
+            output_video_path=output_temp_path,
+            strategy=strategy,
+            position=position
+        )
+
+        # Read watermarked bytes
+        with open(result_path, 'rb') as f:
+            result_bytes = f.read()
+
+        logger.info(f"✅ Watermarked bytes: {len(result_bytes):,} bytes")
+
+        return result_bytes
+
+    finally:
+        # Cleanup temp files
+        try:
+            os.remove(input_temp.name)
+        except Exception:
+            pass
+        try:
+            if os.path.exists(output_temp_path):
+                os.remove(output_temp_path)
+        except Exception:
+            pass
+
+
+# ============================================================
 # STANDALONE TEST
 # ============================================================
 
 if __name__ == "__main__":
     print("\n" + "=" * 60)
-    print("ANTI-CROP WATERMARK TEST")
+    print("WATERMARK - STANDALONE TEST (V2)")
     print("=" * 60)
     print(f"Instagram: {BRANDING['instagram']}")
     print(f"Facebook : {BRANDING['facebook']}")
     print(f"Brand    : {BRANDING['combined']}")
+
+    # ═══════════════════════════════════════════
+    # TEST 1: IMAGE WATERMARKING
+    # ═══════════════════════════════════════════
+    print("\n" + "=" * 60)
+    print("TEST 1: IMAGE WATERMARKING")
+    print("=" * 60)
 
     # Create test image (spiritual gradient)
     test_img = Image.new("RGB", (1024, 1024))
@@ -497,9 +835,53 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"❌ {strategy:10s} → Failed: {e}")
 
-    print(f"\n🎉 Test complete!")
-    print(f"📁 Check output files:")
-    for s in strategies:
-        print(f"   test_watermark_{s}.jpg")
+    # ═══════════════════════════════════════════
+    # TEST 2: VIDEO WATERMARKING
+    # ═══════════════════════════════════════════
+    print("\n" + "=" * 60)
+    print("TEST 2: VIDEO WATERMARKING")
+    print("=" * 60)
 
-    print(f"\n💡 Try to crop these images - watermark will still be visible!")
+    # Check FFmpeg
+    if not _check_ffmpeg():
+        print("\n⚠️  FFmpeg not installed. Skipping video test.")
+        print("   Install FFmpeg to test video watermarking.")
+    else:
+        print("✅ FFmpeg available")
+
+        # Check for test video
+        test_videos = [
+            "test_reel.mp4",
+            "test_concat_basic.mp4",
+            "test_effects_all.mp4"
+        ]
+
+        test_video_found = None
+        for tv in test_videos:
+            if Path(tv).exists():
+                test_video_found = tv
+                break
+
+        if test_video_found:
+            print(f"\n🎥 Test video: {test_video_found}")
+
+            try:
+                output = apply_video_branding(
+                    input_video_path=test_video_found,
+                    output_video_path="test_video_watermarked.mp4",
+                    strategy="balanced"
+                )
+
+                print(f"\n✅ Video watermark test successful!")
+                print(f"   Output: {output}")
+                print(f"\n💡 Play video: start {output}")
+
+            except Exception as e:
+                print(f"❌ Video watermark failed: {e}")
+        else:
+            print("\n⚠️  No test video found. Skipping.")
+            print("   Create a test video to test watermarking.")
+
+    print(f"\n" + "=" * 60)
+    print("🎉 Test complete!")
+    print("=" * 60)

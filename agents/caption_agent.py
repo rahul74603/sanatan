@@ -9,6 +9,8 @@ Features:
 - Rich fallback library (50+ captions)
 - Emoji intelligence
 - Length optimization
+
+V2 UPDATE: Added reel_hook style + post_type awareness
 """
 import random
 import re
@@ -108,6 +110,15 @@ CAPTION_STYLES = {
         "example": "Kanha ki basuri ki dhun me kuch aisa hai...\nJo dil ko chhoo jaati hai,\nAankhein khud band ho jati hain,\nAur bas ek hi shabd nikalta hai...\nRadhe Radhe 🌸🙏",
         "best_for": ["krishna", "shiva", "ram", "durga"],
         "engagement_type": "emotional"
+    },
+    # 🆕 REEL-SPECIFIC STYLE (V2)
+    "reel_hook": {
+        "description": "Reel के लिए hook + engaging body + CTA",
+        "length": "80-120 words",
+        "structure": "Hook question → Story teaser → Save/Share CTA",
+        "example": "क्या आप जानते हैं...\n\nजब भगवान श्री कृष्ण ने अर्जुन से कहा था 'कर्म कर, फल की चिंता मत कर'... इस एक वाक्य में पूरा जीवन का सत्य छुपा है।\n\nपूरी कहानी video में देखिए 🎬\n\n💾 Save करें | 🔄 Share करें\n🙏 Follow @sanatanii_soch",
+        "best_for": ["reel"],
+        "engagement_type": "video_hook"
     }
 }
 
@@ -257,8 +268,12 @@ FALLBACK_CAPTIONS = {
 # HELPER FUNCTIONS
 # ============================================================
 
-def _select_style_for_category(category: str, strategy: dict = None) -> str:
-    """Smart style selection based on category and strategy"""
+def _select_style_for_category(category: str, strategy: dict = None, post_type: str = "image") -> str:
+    """Smart style selection based on category, strategy, and post_type"""
+
+    # 🆕 Reel post → always use reel_hook style
+    if post_type == "reel":
+        return "reel_hook"
 
     # Festival day = festival_special style
     if strategy and strategy.get("content_angle") == "festival_special":
@@ -321,6 +336,11 @@ Deity references you can use:
     if weekday and weekday in ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]:
         weekday_context = f"\n📅 Aaj {weekday} hai."
 
+    # 🆕 Reel context (if applicable)
+    reel_context = ""
+    if memory.post_type == "reel":
+        reel_context = f"\n\n🎬 REEL CAPTION: Video ke saath dikhega. Hook aur CTA important hai."
+
     prompt = f"""Tu ek real Instagram spiritual content creator hai jo Hindi/Hinglish me dil-chhoo captions likhta hai.
 
 ═══════════════════════════════════
@@ -332,6 +352,7 @@ Deity references you can use:
 {festival_context}
 {weekday_context}
 {image_context}
+{reel_context}
 ═══════════════════════════════════
 
 🎯 CAPTION STYLE: {style_name}
@@ -395,20 +416,28 @@ def _extract_response_text(response) -> str:
 
 
 def _clean_caption(caption: str) -> str:
-    """Remove AI artifacts and clean caption"""
+    """
+    Remove AI artifacts and clean caption.
 
-    # Remove common AI prefixes
+    V2.1 FIXES:
+    - Remove position markers like (1), (32), (36
+    - Remove numbered list prefixes 1) 2) etc.
+    - Remove word count annotations
+    - Better prefix removal
+    """
+
     prefixes_to_remove = [
         "here is your caption", "here is the caption", "here's the caption",
         "here is your", "here's your", "caption:", "here's a", "here is a",
         "यहाँ है", "यहाँ", "नीचे", "sure!", "sure,", "of course",
-        "**caption:**", "**caption**"
+        "**caption:**", "**caption**",
+        "here is", "certainly", "definitely",
+        "word count:", "words:", "total words:", "character count:"
     ]
 
     caption_lower = caption.lower()
     for prefix in prefixes_to_remove:
         if caption_lower.startswith(prefix):
-            # Remove till first newline or colon
             for sep in [':', '\n']:
                 if sep in caption:
                     caption = caption.split(sep, 1)[1].strip()
@@ -416,18 +445,50 @@ def _clean_caption(caption: str) -> str:
             break
 
     # Remove wrapping quotes
-    caption = caption.strip('"\'')
+    caption = caption.strip('"\'`')
 
-    # Remove markdown bold
+    # Remove markdown bold/italic
     caption = re.sub(r'\*\*(.*?)\*\*', r'\1', caption)
     caption = re.sub(r'\*(.*?)\*', r'\1', caption)
+
+    # Remove markdown code blocks
+    caption = re.sub(r'```[\w]*\n?', '', caption)
+    caption = caption.replace('```', '')
+
+    # 🆕 V2.1: Remove position markers like (1), (32), (36
+    caption = re.sub(r'\(\d+\)', '', caption)        # (1), (32), (100)
+    caption = re.sub(r'\s\(\d+\s', ' ', caption)     # ' (32 ' → ' '
+    caption = re.sub(r'\s\(\d+$', '', caption)       # trailing '(36'
+    caption = re.sub(r'\(\d+', '', caption)          # unclosed '(36'
+
+    # 🆕 V2.1: Remove numbered list markers
+    caption = re.sub(r'^\s*\d+[\.\):]\s*', '', caption)   # At start: "1) text"
+    caption = re.sub(r'\n\s*\d+[\.\):]\s*', '\n', caption)  # After newline
+
+    # 🆕 V2.1: Remove word count annotations
+    caption = re.sub(r'\[.*?word.*?\]', '', caption, flags=re.IGNORECASE)
+    caption = re.sub(r'\(word count.*?\)', '', caption, flags=re.IGNORECASE)
+    caption = re.sub(r'\[\d+\s*chars?\]', '', caption, flags=re.IGNORECASE)
+
+    # 🆕 V2.1: Remove meta annotations
+    caption = re.sub(r'\[.*?caption.*?\]', '', caption, flags=re.IGNORECASE)
+    caption = re.sub(r'\(.*?instagram.*?\)', '', caption, flags=re.IGNORECASE)
+
+    # 🆕 V2.1: Remove hashtags at end (they come separately)
+    caption = re.sub(r'\n+\s*(#\w+\s*)+$', '', caption)
 
     # Remove excessive newlines
     caption = re.sub(r'\n{3,}', '\n\n', caption)
 
-    # Strip and return
-    return caption.strip()
+    # Remove extra spaces
+    caption = re.sub(r' +', ' ', caption)
 
+    # Trim per line
+    lines = caption.split('\n')
+    lines = [line.strip() for line in lines]
+    caption = '\n'.join(lines)
+
+    return caption.strip()
 
 def _count_emojis(text: str) -> int:
     """Count emojis in text"""
@@ -510,12 +571,17 @@ def run(memory: AgentMemory) -> AgentMemory:
 
     # ========== STEP 1: SELECT STYLE ==========
     strategy = memory.analytics_data.get("strategy", {})
-    style_name = _select_style_for_category(memory.category, strategy)
+    style_name = _select_style_for_category(
+        memory.category,
+        strategy,
+        post_type=memory.post_type  # 🆕 Pass post_type for reel detection
+    )
 
     style_info = CAPTION_STYLES[style_name]
     logger.info(f"🎨 Style: {style_name}")
     logger.info(f"📏 Target length: {style_info['length']}")
     logger.info(f"🎯 Engagement type: {style_info['engagement_type']}")
+    logger.info(f"📊 Post type: {memory.post_type}")
 
     # ========== STEP 2: BUILD SMART PROMPT ==========
     prompt = _build_smart_prompt(memory, style_name)
@@ -613,21 +679,24 @@ if __name__ == "__main__":
             "category": "krishna",
             "mood": "peaceful, divine, romantic",
             "visual_elements": ["flute", "peacock feather", "cows", "yellow dhoti"],
-            "colors": ["blue", "yellow", "green"]
+            "colors": ["blue", "yellow", "green"],
+            "post_type": "image"
         },
         {
             "topic": "Lord Shiva meditating in Himalayas",
             "category": "shiva",
             "mood": "powerful, mystical, serene",
             "visual_elements": ["trishul", "snake", "moon"],
-            "colors": ["blue", "white", "silver"]
+            "colors": ["blue", "white", "silver"],
+            "post_type": "image"
         },
         {
-            "topic": "Warrior on mountain peak at sunrise",
-            "category": "motivational",
-            "mood": "inspiring, energetic",
-            "visual_elements": ["mountain", "sunrise", "warrior silhouette"],
-            "colors": ["orange", "gold", "red"]
+            "topic": "Krishna teaching Gita to Arjuna",
+            "category": "krishna",
+            "mood": "divine, powerful, wise",
+            "visual_elements": ["chariot", "battlefield"],
+            "colors": ["blue", "gold"],
+            "post_type": "reel"  # 🆕 Test reel style
         }
     ]
 
@@ -635,6 +704,7 @@ if __name__ == "__main__":
         print(f"\n{'=' * 60}")
         print(f"Topic: {test['topic']}")
         print(f"Category: {test['category']}")
+        print(f"Post Type: {test['post_type']}")
         print("=" * 60)
 
         memory = AgentMemory()
@@ -644,6 +714,7 @@ if __name__ == "__main__":
         memory.visual_elements = test["visual_elements"]
         memory.colors = test["colors"]
         memory.image_prompt = f"Image of {test['topic']}"
+        memory.post_type = test["post_type"]
 
         result = run(memory)
 

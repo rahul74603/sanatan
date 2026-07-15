@@ -41,3 +41,63 @@ divine_poster.db
 test_*.py
 test_*.jpg
 test_*.png
+
+# ═══════════════════════════════════════════
+# 🆕 DIVINE AI CONTENT FACTORY V2
+# ═══════════════════════════════════════════
+
+# 🔒 YouTube OAuth Credentials (CRITICAL - Never commit!)
+sanatani_youtube_client_secrets.json
+sanatani_youtube_token.json
+youtube_client_secrets.json
+youtube_token.json
+*_youtube_client_secrets.json
+*_youtube_token.json
+
+# 🔒 Any other client secrets
+client_secret_*.json
+*_client_secrets.json
+
+# 🎬 Temp video/audio files
+temp_*.mp4
+temp_*.jpg
+temp_*.mp3
+temp_*.wav
+temp_*.png
+*_watermark.png
+*.tmp
+
+# 🧪 Test outputs
+test_*.jpg
+test_*.mp4
+test_*.mp3
+test_vertex.jpg
+test_humanized.jpg
+test_watermark_*.jpg
+test_reel.mp4
+test_output.*
+
+# 🎵 Assets (music/media files - too big for git)
+assets/music/*.mp3
+assets/music/*.wav
+assets/music/*.m4a
+assets/intro/*.mp4
+assets/outro/*.mp4
+assets/*.tmp
+
+# 💾 Cache directories
+logs/tts_cache/
+logs/recovery/
+logs/temp/
+.cache/
+
+# 🎬 FFmpeg temp files
+ffmpeg2pass-*.log
+*.ffindex
+
+# 🎥 Rendered video temp
+render_temp/
+video_temp/
+
+# 📊 Local analytics dumps
+analytics_dump_*.json

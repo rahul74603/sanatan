@@ -11,6 +11,8 @@ Features:
 - Historical trend analysis
 - Multi-metric intelligence
 - ALWAYS returns memory (no None issues)
+
+V2 UPDATE: Added reel-specific metrics (plays, avg_watch_time, etc.)
 """
 import requests
 import time
@@ -108,7 +110,7 @@ def _ensure_extended_tables():
 
 
 # ============================================================
-# INSTAGRAM METRICS FETCHER (IMPROVED)
+# INSTAGRAM METRICS FETCHER (V2 - WITH REEL METRICS)
 # ============================================================
 
 def _fetch_ig_analytics(post_id: str, retries: int = 2) -> dict:
@@ -117,7 +119,8 @@ def _fetch_ig_analytics(post_id: str, retries: int = 2) -> dict:
     Strategy:
     1. Get basic metrics first (likes, comments) - always works
     2. Try insights (reach, impressions) - may fail for new posts
-    3. Combine and return
+    3. 🆕 V2: Try reel-specific metrics if VIDEO/REELS media type
+    4. Combine and return
     """
     if not post_id:
         return {}
@@ -128,7 +131,12 @@ def _fetch_ig_analytics(post_id: str, retries: int = 2) -> dict:
         "reach": 0,
         "impressions": 0,
         "saved": 0,
-        "shares": 0
+        "shares": 0,
+        # 🆕 V2: Reel-specific metrics
+        "plays": 0,
+        "avg_watch_time": 0,
+        "total_interactions": 0,
+        "video_views": 0,
     }
 
     # ═══════════════════════════════════════════
@@ -185,6 +193,53 @@ def _fetch_ig_analytics(post_id: str, retries: int = 2) -> dict:
 
     except Exception as e:
         logger.info(f"ℹ️ IG insights fetch skipped: {e}")
+
+    # ═══════════════════════════════════════════
+    # 🆕 STEP 3 (V2): Try reel-specific metrics (if video)
+    # ═══════════════════════════════════════════
+    try:
+        # First check if this is a video/reel
+        media_check_url = f"https://graph.facebook.com/{META_VERSION}/{post_id}"
+        media_response = requests.get(
+            media_check_url,
+            params={'fields': 'media_type', 'access_token': ACCESS_TOKEN},
+            timeout=10
+        )
+
+        if media_response.status_code == 200:
+            media_type = media_response.json().get('media_type', '')
+
+            if media_type in ["VIDEO", "REELS"]:
+                logger.info(f"🎬 Fetching reel-specific metrics (media_type: {media_type})")
+
+                reel_insights_url = f"https://graph.facebook.com/{META_VERSION}/{post_id}/insights"
+                reel_response = requests.get(
+                    reel_insights_url,
+                    params={
+                        'metric': 'plays,total_interactions,ig_reels_video_view_total_time,ig_reels_avg_watch_time',
+                        'access_token': ACCESS_TOKEN
+                    },
+                    timeout=10
+                )
+
+                if reel_response.status_code == 200:
+                    reel_data = reel_response.json().get('data', [])
+                    for item in reel_data:
+                        metric_name = item['name']
+                        value = item.get('values', [{}])[0].get('value', 0)
+
+                        # Map to our fields
+                        if metric_name == "plays":
+                            result["plays"] = value
+                        elif metric_name == "total_interactions":
+                            result["total_interactions"] = value
+                        elif metric_name == "ig_reels_avg_watch_time":
+                            result["avg_watch_time"] = value / 1000  # ms to seconds
+
+                    logger.info(f"✅ Reel metrics: plays={result['plays']}, avg_watch={result['avg_watch_time']}s")
+
+    except Exception as e:
+        logger.info(f"ℹ️ Reel metrics fetch skipped: {e}")
 
     return result
 
@@ -557,6 +612,7 @@ def _log_analytics_summary(memory: AgentMemory, ig_data: dict, fb_data: dict):
     logger.info(f"│ 📌 Topic     : {(memory.topic or '')[:35]}")
     logger.info(f"│ 📂 Category  : {memory.category or 'unknown'}")
     logger.info(f"│ 🎨 Style     : {memory.image_style or 'unknown'}")
+    logger.info(f"│ 📊 Post Type : {getattr(memory, 'post_type', 'image')}")
     logger.info("├─────────────────────────────────────────────┤")
 
     if ig_data:
@@ -567,6 +623,14 @@ def _log_analytics_summary(memory: AgentMemory, ig_data: dict, fb_data: dict):
         logger.info(f"│   💬 Comments    : {ig_data.get('comments', 0)}")
         logger.info(f"│   💾 Saves       : {ig_data.get('saved', 0)}")
         logger.info(f"│   🔄 Shares      : {ig_data.get('shares', 0)}")
+
+        # 🆕 Show reel metrics if present
+        if ig_data.get('plays', 0) > 0:
+            logger.info(f"│   🎬 REEL METRICS:")
+            logger.info(f"│     ▶️  Plays      : {ig_data.get('plays', 0)}")
+            logger.info(f"│     ⏱️  Avg Watch  : {ig_data.get('avg_watch_time', 0):.1f}s")
+            logger.info(f"│     💫 Total Int  : {ig_data.get('total_interactions', 0)}")
+
         logger.info(f"│   🎯 Score       : {_get_engagement_score(ig_data, 'instagram')}")
 
     if fb_data:
@@ -580,13 +644,15 @@ def _log_analytics_summary(memory: AgentMemory, ig_data: dict, fb_data: dict):
 
 
 # ============================================================
-# MAIN AGENT FUNCTION (FIXED - ALWAYS RETURNS MEMORY)
+# MAIN AGENT FUNCTION (V2 - REEL AWARE)
 # ============================================================
 
 def run(memory: AgentMemory, post_db_id: int = 0) -> AgentMemory:
     """
     Comprehensive analytics + learning
     IMPORTANT: Always returns memory (never None)
+
+    V2 UPDATE: Uses reel_ig_post_id if post_type=reel, saves to reel_analytics table
     """
     logger.info("=" * 50)
     logger.info("=== ANALYTICS AGENT STARTED ===")
@@ -605,26 +671,70 @@ def run(memory: AgentMemory, post_db_id: int = 0) -> AgentMemory:
         fb_data = {}
 
         # ═══════════════════════════════════════════
+        # 🆕 V2: DETERMINE POST IDs (reel or regular)
+        # ═══════════════════════════════════════════
+
+        # Instagram
+        ig_post_id_to_fetch = ""
+        if hasattr(memory, 'reel_ig_post_id') and memory.reel_ig_post_id:
+            ig_post_id_to_fetch = memory.reel_ig_post_id
+            logger.info(f"🎬 Using REEL IG post ID: {ig_post_id_to_fetch}")
+        elif memory.ig_post_id:
+            ig_post_id_to_fetch = memory.ig_post_id
+            logger.info(f"📸 Using regular IG post ID: {ig_post_id_to_fetch}")
+
+        # Facebook
+        fb_post_id_to_fetch = ""
+        if hasattr(memory, 'reel_fb_post_id') and memory.reel_fb_post_id:
+            fb_post_id_to_fetch = memory.reel_fb_post_id
+            logger.info(f"🎬 Using REEL FB post ID: {fb_post_id_to_fetch}")
+        elif memory.fb_post_id:
+            fb_post_id_to_fetch = memory.fb_post_id
+            logger.info(f"📘 Using regular FB post ID: {fb_post_id_to_fetch}")
+
+        # ═══════════════════════════════════════════
         # FETCH METRICS
         # ═══════════════════════════════════════════
 
-        if memory.ig_post_id:
-            logger.info(f"📸 Fetching Instagram metrics for: {memory.ig_post_id}")
-            ig_data = _fetch_ig_analytics(memory.ig_post_id)
+        if ig_post_id_to_fetch:
+            logger.info(f"📸 Fetching Instagram metrics for: {ig_post_id_to_fetch}")
+            ig_data = _fetch_ig_analytics(ig_post_id_to_fetch)
 
             if ig_data and post_db_id > 0:
                 try:
                     save_analytics(post_db_id, "instagram", ig_data)
+
+                    # 🆕 V2: If reel, also save reel-specific analytics
+                    is_reel = hasattr(memory, 'post_type') and memory.post_type == "reel"
+                    if is_reel:
+                        try:
+                            from core.database import save_reel_analytics
+                            save_reel_analytics(post_db_id, "instagram", ig_data)
+                            logger.info("✅ Reel analytics saved to reel_analytics table")
+                        except Exception as e:
+                            logger.warning(f"Reel analytics save failed: {e}")
+
                 except Exception as e:
                     logger.warning(f"Save IG analytics failed: {e}")
 
-        if memory.fb_post_id:
-            logger.info(f"📘 Fetching Facebook metrics for: {memory.fb_post_id}")
-            fb_data = _fetch_fb_analytics(memory.fb_post_id)
+        if fb_post_id_to_fetch:
+            logger.info(f"📘 Fetching Facebook metrics for: {fb_post_id_to_fetch}")
+            fb_data = _fetch_fb_analytics(fb_post_id_to_fetch)
 
             if fb_data and post_db_id > 0:
                 try:
                     save_analytics(post_db_id, "facebook", fb_data)
+
+                    # 🆕 V2: If reel, save FB reel analytics too
+                    is_reel = hasattr(memory, 'post_type') and memory.post_type == "reel"
+                    if is_reel:
+                        try:
+                            from core.database import save_reel_analytics
+                            save_reel_analytics(post_db_id, "facebook", fb_data)
+                            logger.info("✅ FB Reel analytics saved")
+                        except Exception as e:
+                            logger.warning(f"FB Reel analytics save failed: {e}")
+
                 except Exception as e:
                     logger.warning(f"Save FB analytics failed: {e}")
 
@@ -705,6 +815,11 @@ def run(memory: AgentMemory, post_db_id: int = 0) -> AgentMemory:
         logger.info(f"👀 Total Reach     : {combined_reach}")
         logger.info(f"💥 Total Engagement: {combined_engagement}")
         logger.info(f"🎯 Score           : {_get_engagement_score(ig_data, 'instagram') if ig_data else 'N/A'}")
+
+        # 🆕 Show reel metrics
+        if ig_data.get('plays', 0) > 0:
+            logger.info(f"🎬 Reel Plays      : {ig_data.get('plays', 0)}")
+
         logger.info("=" * 50)
 
     except Exception as e:

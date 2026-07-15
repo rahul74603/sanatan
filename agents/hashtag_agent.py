@@ -9,6 +9,8 @@ Features:
 - Regional targeting (India-specific)
 - Auto-deduplication
 - Length + count validation
+
+V2 UPDATE: Added REEL_SPECIFIC_HASHTAGS + post_type awareness
 """
 import random
 import re
@@ -232,6 +234,26 @@ WEEKDAY_HASHTAGS = {
     6: ["#sundayvibes", "#ravivaar", "#suryadev"]
 }
 
+
+# ═══════════════════════════════════════════════════════════
+# 🆕 V2: REEL-SPECIFIC HASHTAGS (Instagram Reels + YT Shorts)
+# ═══════════════════════════════════════════════════════════
+REEL_SPECIFIC_HASHTAGS = [
+    # Reel platform tags
+    "#reels", "#reelsinstagram", "#reelitfeelit", "#reelkarofeelkaro",
+    "#trendingreels", "#viralreels", "#instareels", "#reelsindia",
+
+    # Short video tags
+    "#shorts", "#youtubeshorts", "#shortsvideo", "#shortsindia",
+    "#shortsfeed", "#shortvideo", "#shortsyoutube",
+
+    # Content type
+    "#spiritualreels", "#devotionalreels", "#storyreels",
+    "#educationalreels", "#mythologyreels", "#reelsspiritual",
+    "#dharmicreels", "#hindureels"
+]
+
+
 # ═══════════════════════════════════════════════════════════
 # BLOCKED / SHADOW-BAN RISK (NEVER USE)
 # ═══════════════════════════════════════════════════════════
@@ -257,6 +279,7 @@ OPTIMAL_MIX = {
     "festival": 2,             # 2 if festival day
     "time_weekday": 2,         # 2 time/weekday specific
     "keywords": 3,             # 3 from research keywords
+    "reel_specific": 5,        # 🆕 5 reel tags (if post_type=reel)
 }
 
 # Total: ~28-30 hashtags → Trim to 25 (Instagram sweet spot)
@@ -337,6 +360,14 @@ def _get_keyword_hashtags(keywords: list) -> list:
     return tags
 
 
+def _get_reel_hashtags(count: int = 5) -> list:
+    """🆕 Get reel-specific hashtags"""
+    return random.sample(
+        REEL_SPECIFIC_HASHTAGS,
+        min(count, len(REEL_SPECIFIC_HASHTAGS))
+    )
+
+
 def _remove_duplicates_preserve_order(hashtags: list) -> list:
     """Remove duplicates while preserving order (first occurrence wins)"""
     seen = set()
@@ -395,7 +426,10 @@ def run(memory: AgentMemory) -> AgentMemory:
     breakdown = {}
 
     category = memory.category
+    post_type = getattr(memory, 'post_type', 'image')
+
     logger.info(f"📂 Category: {category}")
+    logger.info(f"📊 Post type: {post_type}")
 
     # ═══════════════════════════════════════════════
     # TIER 1: MASSIVE REACH (2 tags)
@@ -491,6 +525,15 @@ def run(memory: AgentMemory) -> AgentMemory:
         breakdown["Keywords"] = len(keyword_tags[:3])
 
     # ═══════════════════════════════════════════════
+    # 🆕 V2: REEL-SPECIFIC HASHTAGS
+    # ═══════════════════════════════════════════════
+    if post_type == "reel":
+        reel_tags = _get_reel_hashtags(OPTIMAL_MIX["reel_specific"])
+        all_hashtags.extend(reel_tags)
+        breakdown["Reel-Specific"] = len(reel_tags)
+        logger.info(f"🎬 Reel hashtags added: {len(reel_tags)}")
+
+    # ═══════════════════════════════════════════════
     # CLEANUP + VALIDATION
     # ═══════════════════════════════════════════════
     logger.info(f"📊 Raw hashtags: {len(all_hashtags)}")
@@ -541,20 +584,22 @@ if __name__ == "__main__":
     print("=" * 60 + "\n")
 
     test_cases = [
-        {"category": "krishna", "keywords": ["vrindavan", "flute", "peacock"]},
-        {"category": "shiva", "keywords": ["kailash", "trishul", "meditation"]},
-        {"category": "motivational", "keywords": ["sunrise", "success", "courage"]},
+        {"category": "krishna", "keywords": ["vrindavan", "flute", "peacock"], "post_type": "image"},
+        {"category": "shiva", "keywords": ["kailash", "trishul", "meditation"], "post_type": "image"},
+        {"category": "krishna", "keywords": ["gita", "arjuna"], "post_type": "reel"},  # 🆕 Reel test
     ]
 
     for test in test_cases:
         print(f"\n{'=' * 60}")
         print(f"Category: {test['category']}")
+        print(f"Post Type: {test['post_type']}")
         print("=" * 60)
 
         memory = AgentMemory()
         memory.category = test["category"]
         memory.keywords = test["keywords"]
         memory.is_festival = False
+        memory.post_type = test["post_type"]
 
         result = run(memory)
 

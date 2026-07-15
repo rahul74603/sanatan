@@ -5,10 +5,11 @@ Features:
 - हर स्टेज पर checkpoint save करता है
 - अगली बार run पर पुराने अधूरे काम detect करता है
 - Image bytes local save (दोबारा AI se नहीं बनाना पड़ता)
+- 🆕 Voice bytes + SRT save (reel के लिए)
 - 24 घंटे बाद auto-cleanup
 - Token/Time/Money बचाता है
 
-Recovery Stages:
+Recovery Stages (Carousel):
 1. TOPIC_SELECTED       - Planner हो चुका
 2. SLIDES_STRUCTURED    - Gemini ने 5 slide structure दे दिया
 3. IMAGES_GENERATED     - सभी images बन गयीं (bytes locally saved)
@@ -16,6 +17,18 @@ Recovery Stages:
 5. IG_CONTAINERS_READY  - IG media_ids मिल गए
 6. FB_UPLOADED          - FB photo_ids मिल गए
 7. PUBLISHED            - Complete (recovery delete)
+
+🆕 Recovery Stages (Reel):
+10. REEL_STORY_WRITTEN     - Hindi story तैयार
+11. REEL_SCENES_SPLIT      - 6 scenes में divide हुआ
+12. REEL_IMAGES_GENERATED  - सभी 6 scene images बनी
+13. REEL_VOICE_GENERATED   - TTS voice तैयार
+14. REEL_SUBTITLES_MADE    - SRT subtitles बने
+15. REEL_VIDEO_BUILT       - Final video local बना
+16. REEL_VIDEO_UPLOADED    - GCS पर upload हुआ
+17. REEL_IG_PUBLISHED      - Instagram पर publish
+18. REEL_FB_PUBLISHED      - Facebook पर publish
+19. REEL_YT_PUBLISHED      - YouTube पर publish
 """
 import json
 import time
@@ -37,12 +50,14 @@ RECOVERY_DIR = Path("logs/recovery")
 RECOVERY_EXPIRY_HOURS = 24    # 24 घंटे बाद पुराने recovery delete
 MAX_RECOVERY_SESSIONS = 5     # ज़्यादा से ज़्यादा 5 pending sessions
 
-# Cost estimates (per slide)
+# Cost estimates (per unit)
 COST_PER_IMAGE_INR = 2.5      # Imagen cost
 COST_PER_GEMINI_CALL_INR = 0.5
+COST_PER_TTS_CALL_INR = 0.5   # 🆕 TTS cost
 
-# Recovery stages
+# Recovery stages (Carousel + Reel)
 STAGES = {
+    # Carousel/Image stages
     "TOPIC_SELECTED":       1,
     "SLIDES_STRUCTURED":    2,
     "IMAGES_GENERATED":     3,
@@ -50,9 +65,22 @@ STAGES = {
     "IG_CONTAINERS_READY":  5,
     "FB_UPLOADED":          6,
     "PUBLISHED":            7,
+
+    # 🆕 Reel stages (10-19)
+    "REEL_STORY_WRITTEN":     10,
+    "REEL_SCENES_SPLIT":      11,
+    "REEL_IMAGES_GENERATED":  12,
+    "REEL_VOICE_GENERATED":   13,
+    "REEL_SUBTITLES_MADE":    14,
+    "REEL_VIDEO_BUILT":       15,
+    "REEL_VIDEO_UPLOADED":    16,
+    "REEL_IG_PUBLISHED":      17,
+    "REEL_FB_PUBLISHED":      18,
+    "REEL_YT_PUBLISHED":      19,
 }
 
 STAGE_NAMES_HINDI = {
+    # Carousel
     "TOPIC_SELECTED":       "विषय चुना गया",
     "SLIDES_STRUCTURED":    "स्लाइड्स का ढांचा तैयार",
     "IMAGES_GENERATED":     "तस्वीरें बन गयीं",
@@ -60,7 +88,22 @@ STAGE_NAMES_HINDI = {
     "IG_CONTAINERS_READY":  "इंस्टाग्राम कंटेनर तैयार",
     "FB_UPLOADED":          "फेसबुक पर अपलोड हुआ",
     "PUBLISHED":            "पूरी तरह पब्लिश हुआ",
+
+    # 🆕 Reel
+    "REEL_STORY_WRITTEN":     "रील की कहानी तैयार",
+    "REEL_SCENES_SPLIT":      "6 दृश्यों में बंटा",
+    "REEL_IMAGES_GENERATED":  "रील की तस्वीरें बनी",
+    "REEL_VOICE_GENERATED":   "आवाज़ तैयार",
+    "REEL_SUBTITLES_MADE":    "सबटाइटल बने",
+    "REEL_VIDEO_BUILT":       "वीडियो बना",
+    "REEL_VIDEO_UPLOADED":    "वीडियो अपलोड हुआ",
+    "REEL_IG_PUBLISHED":      "इंस्टाग्राम पर पब्लिश",
+    "REEL_FB_PUBLISHED":      "फेसबुक पर पब्लिश",
+    "REEL_YT_PUBLISHED":      "यूट्यूब पर पब्लिश",
 }
+
+# Stages that mean "fully complete" (delete checkpoint)
+COMPLETED_STAGES = {"PUBLISHED", "REEL_YT_PUBLISHED"}
 
 
 # ============================================================
@@ -85,7 +128,9 @@ def save_checkpoint(
     session_id: str,
     stage: str,
     data: dict,
-    slides_bytes: Optional[dict] = None
+    slides_bytes: Optional[dict] = None,
+    voice_bytes: Optional[bytes] = None,
+    subtitle_srt: Optional[str] = None
 ) -> bool:
     """
     Checkpoint save करो — किसी भी stage पर
@@ -94,7 +139,11 @@ def save_checkpoint(
         session_id: Unique session ID
         stage: Current stage (STAGES में से एक)
         data: सब metadata (topic, slides info, media_ids etc.)
-        slides_bytes: {slide_num: bytes} — actual image bytes save करने के लिए
+        slides_bytes: Dict with keys:
+            - int (1, 2, 3...) for carousel slides → saves as slide_N.jpg
+            - str ("reel_scene_1", "reel_scene_2"...) for reel → saves as reel_scene_N.jpg
+        voice_bytes: 🆕 Reel voice MP3 bytes → saves as voice.mp3
+        subtitle_srt: 🆕 Reel SRT content → saves as subtitles.srt
 
     Returns:
         True अगर save हो गया
@@ -110,11 +159,32 @@ def save_checkpoint(
 
         # Save image bytes (अगर दिया है तो)
         if slides_bytes:
-            for slide_num, img_bytes in slides_bytes.items():
+            for key, img_bytes in slides_bytes.items():
                 if img_bytes:
-                    img_path = session_dir / f"slide_{slide_num}.jpg"
+                    # Handle both carousel (int) and reel (string) keys
+                    if isinstance(key, int):
+                        filename = f"slide_{key}.jpg"
+                    else:
+                        # e.g., "reel_scene_1" → reel_scene_1.jpg
+                        filename = f"{key}.jpg"
+
+                    img_path = session_dir / filename
                     with open(img_path, 'wb') as f:
                         f.write(img_bytes)
+
+        # 🆕 Save voice bytes (for reels)
+        if voice_bytes:
+            voice_path = session_dir / "voice.mp3"
+            with open(voice_path, 'wb') as f:
+                f.write(voice_bytes)
+            logger.info(f"💾 Voice saved: {len(voice_bytes):,} bytes")
+
+        # 🆕 Save subtitle SRT (for reels)
+        if subtitle_srt:
+            srt_path = session_dir / "subtitles.srt"
+            with open(srt_path, 'w', encoding='utf-8') as f:
+                f.write(subtitle_srt)
+            logger.info(f"💾 Subtitles saved: {len(subtitle_srt)} chars")
 
         # Save state.json
         state = {
@@ -148,6 +218,13 @@ def load_checkpoint(session_id: str) -> Optional[dict]:
     """
     किसी session का checkpoint load करो
     Returns: full state dict या None
+
+    Loads:
+    - state.json (metadata)
+    - slide_*.jpg (carousel images)
+    - reel_scene_*.jpg (reel scene images)
+    - voice.mp3 (reel voice)
+    - subtitles.srt (reel subtitles)
     """
     try:
         session_dir = _get_session_dir(session_id)
@@ -161,6 +238,8 @@ def load_checkpoint(session_id: str) -> Optional[dict]:
 
         # Load image bytes back
         slides_bytes = {}
+
+        # Carousel slides (slide_N.jpg)
         for slide_file in session_dir.glob("slide_*.jpg"):
             try:
                 slide_num = int(slide_file.stem.split("_")[1])
@@ -169,7 +248,34 @@ def load_checkpoint(session_id: str) -> Optional[dict]:
             except Exception as e:
                 logger.warning(f"⚠️  स्लाइड {slide_file.name} load नहीं हुई: {e}")
 
+        # 🆕 Reel scenes (reel_scene_N.jpg)
+        for scene_file in session_dir.glob("reel_scene_*.jpg"):
+            try:
+                # Key = full stem name (e.g., "reel_scene_1")
+                key = scene_file.stem
+                with open(scene_file, 'rb') as f:
+                    slides_bytes[key] = f.read()
+            except Exception as e:
+                logger.warning(f"⚠️  Scene {scene_file.name} load नहीं हुई: {e}")
+
         state["slides_bytes"] = slides_bytes
+
+        # 🆕 Load voice bytes
+        voice_path = session_dir / "voice.mp3"
+        if voice_path.exists():
+            with open(voice_path, 'rb') as f:
+                state["voice_bytes"] = f.read()
+            # Also add to slides_bytes with special key
+            state["slides_bytes"]["voice_bytes"] = state["voice_bytes"]
+            logger.info(f"♻️  Voice loaded: {len(state['voice_bytes']):,} bytes")
+
+        # 🆕 Load subtitle SRT
+        srt_path = session_dir / "subtitles.srt"
+        if srt_path.exists():
+            with open(srt_path, 'r', encoding='utf-8') as f:
+                state["subtitle_srt"] = f.read()
+            logger.info(f"♻️  Subtitles loaded: {len(state['subtitle_srt'])} chars")
+
         return state
 
     except Exception as e:
@@ -204,12 +310,17 @@ def delete_checkpoint(session_id: str) -> bool:
 def find_pending_recovery(post_type: str = "carousel") -> Optional[dict]:
     """
     सबसे नया pending session ढूंढो जो अभी complete नहीं हुआ
+
+    Args:
+        post_type: "carousel" | "image" | "reel"
+
     Returns: state dict या None
 
     Logic:
     - सभी session folders scan करो
     - 24 घंटे से पुराने skip करो
-    - PUBLISHED stage वालों को skip करो
+    - Completed stages वालों को skip करो (PUBLISHED, REEL_YT_PUBLISHED)
+    - Post type match करो
     - सबसे नया pending return करो
     """
     try:
@@ -248,10 +359,10 @@ def find_pending_recovery(post_type: str = "carousel") -> Optional[dict]:
                 if state.get("data", {}).get("post_type") != post_type:
                     continue
 
-                # Check if already published
-                if state.get("stage") == "PUBLISHED":
+                # Check if already completed
+                if state.get("stage") in COMPLETED_STAGES:
                     logger.info(
-                        f"✅ Published session मिला "
+                        f"✅ Completed session मिला "
                         f"({state['session_id'][:8]}) — cleanup कर रहे हैं"
                     )
                     shutil.rmtree(session_dir)
@@ -280,6 +391,8 @@ def find_pending_recovery(post_type: str = "carousel") -> Optional[dict]:
         session_dir = _get_session_dir(session_id)
 
         slides_bytes = {}
+
+        # Carousel slides
         for slide_file in session_dir.glob("slide_*.jpg"):
             try:
                 slide_num = int(slide_file.stem.split("_")[1])
@@ -287,6 +400,29 @@ def find_pending_recovery(post_type: str = "carousel") -> Optional[dict]:
                     slides_bytes[slide_num] = f.read()
             except Exception:
                 pass
+
+        # 🆕 Reel scenes
+        for scene_file in session_dir.glob("reel_scene_*.jpg"):
+            try:
+                key = scene_file.stem
+                with open(scene_file, 'rb') as f:
+                    slides_bytes[key] = f.read()
+            except Exception:
+                pass
+
+        # 🆕 Voice bytes
+        voice_path = session_dir / "voice.mp3"
+        if voice_path.exists():
+            with open(voice_path, 'rb') as f:
+                voice_data = f.read()
+                slides_bytes["voice_bytes"] = voice_data
+                latest["voice_bytes"] = voice_data
+
+        # 🆕 Subtitles
+        srt_path = session_dir / "subtitles.srt"
+        if srt_path.exists():
+            with open(srt_path, 'r', encoding='utf-8') as f:
+                latest["subtitle_srt"] = f.read()
 
         latest["slides_bytes"] = slides_bytes
         return latest
@@ -303,40 +439,66 @@ def find_pending_recovery(post_type: str = "carousel") -> Optional[dict]:
 def calculate_savings(resumed_from_stage: str) -> dict:
     """
     गणना करो कि recovery से कितने पैसे और समय बचे
+    Works for both carousel and reel stages
     """
     stage_num = STAGES.get(resumed_from_stage, 0)
 
-    # Kitne API calls skip हुए
-    if stage_num >= 3:  # IMAGES_GENERATED से आगे
+    images_saved = 0
+    gemini_saved = 0
+    tts_saved = 0
+    time_saved_min = 0
+
+    # ═══════════════════════════════════════════
+    # CAROUSEL SAVINGS
+    # ═══════════════════════════════════════════
+    if stage_num >= 3 and stage_num < 10:  # IMAGES_GENERATED (carousel)
         images_saved = 5
         gemini_saved = 2  # structure + caption
-    elif stage_num >= 2:  # SLIDES_STRUCTURED से आगे
-        images_saved = 0
-        gemini_saved = 1
-    else:
-        images_saved = 0
-        gemini_saved = 0
+        time_saved_min = 5
 
+    if stage_num >= 4 and stage_num < 10:  # IMAGES_UPLOADED
+        time_saved_min = 6
+
+    if stage_num >= 5 and stage_num < 10:  # IG_CONTAINERS_READY
+        time_saved_min = 7
+
+    # ═══════════════════════════════════════════
+    # 🆕 REEL SAVINGS
+    # ═══════════════════════════════════════════
+    if stage_num >= 11:  # REEL_SCENES_SPLIT+ (story + fact_check + scenes done)
+        gemini_saved = 3
+
+    if stage_num >= 12:  # REEL_IMAGES_GENERATED+ (6 images saved)
+        images_saved = 6
+        gemini_saved = 4  # story + fact + scenes + prompts
+        time_saved_min = 5
+
+    if stage_num >= 13:  # REEL_VOICE_GENERATED+ (TTS done)
+        tts_saved = 1
+        time_saved_min = 6
+
+    if stage_num >= 14:  # REEL_SUBTITLES_MADE+
+        time_saved_min = 7
+
+    if stage_num >= 15:  # REEL_VIDEO_BUILT+ (Video building takes 5-10 min)
+        time_saved_min = 12
+
+    if stage_num >= 16:  # REEL_VIDEO_UPLOADED+
+        time_saved_min = 14
+
+    # Calculate total money
     money_saved = (
         images_saved * COST_PER_IMAGE_INR +
-        gemini_saved * COST_PER_GEMINI_CALL_INR
+        gemini_saved * COST_PER_GEMINI_CALL_INR +
+        tts_saved * COST_PER_TTS_CALL_INR
     )
 
-    # Time savings estimate
-    if stage_num >= 3:
-        time_saved_min = 5  # पूरी image generation skip
-    elif stage_num >= 4:
-        time_saved_min = 6  # + upload skip
-    elif stage_num >= 5:
-        time_saved_min = 7  # + IG containers skip
-    else:
-        time_saved_min = 2
-
     return {
-        "money_saved_inr": round(money_saved, 2),
-        "time_saved_min":  time_saved_min,
-        "images_reused":   images_saved,
+        "money_saved_inr":    round(money_saved, 2),
+        "time_saved_min":     time_saved_min,
+        "images_reused":      images_saved,
         "gemini_calls_saved": gemini_saved,
+        "tts_calls_saved":    tts_saved,
     }
 
 
@@ -362,12 +524,17 @@ def display_pending_recovery(state: dict):
     logger.info(f"║ 🆔 सेशन        : {session_id[:8]}")
     logger.info(f"║ 📌 विषय        : {data.get('topic', 'अज्ञात')[:40]}")
     logger.info(f"║ 📂 श्रेणी       : {data.get('category', 'अज्ञात')}")
+    logger.info(f"║ 📊 प्रकार       : {data.get('post_type', 'अज्ञात')}")
     logger.info(f"║ 📊 अंतिम स्टेज  : {stage_hindi}")
     logger.info(f"║ 🕐 कब बना था   : {state['timestamp'][:19]}")
     logger.info("╠══════════════════════════════════════════════╣")
     logger.info(f"║ 💰 पैसे बचेंगे  : ₹{savings['money_saved_inr']}")
     logger.info(f"║ ⏱️  समय बचेगा   : ~{savings['time_saved_min']} मिनट")
     logger.info(f"║ 🎨 तस्वीरें फिर से बनेंगी: नहीं ✅")
+
+    if savings.get('tts_calls_saved', 0) > 0:
+        logger.info(f"║ 🎤 आवाज़ फिर से बनेगी: नहीं ✅")
+
     logger.info("╚══════════════════════════════════════════════╝")
     logger.info("")
 
@@ -416,6 +583,7 @@ def get_recovery_stats() -> dict:
             stats["sessions"].append({
                 "session_id": state["session_id"][:8],
                 "stage":      STAGE_NAMES_HINDI.get(state["stage"], state["stage"]),
+                "post_type":  state.get("data", {}).get("post_type", "?"),
                 "topic":      state.get("data", {}).get("topic", "अज्ञात")[:40],
                 "age_hours":  round(age_hours, 1),
                 "size_mb":    round(total_size / (1024*1024), 2),
@@ -451,7 +619,7 @@ def display_recovery_stats():
 
     if stats["sessions"]:
         for s in stats["sessions"]:
-            logger.info(f"║ 🆔 {s['session_id']} | {s['stage']}")
+            logger.info(f"║ 🆔 {s['session_id']} | {s['post_type']} | {s['stage']}")
             logger.info(f"║    विषय: {s['topic']}")
             logger.info(f"║    उम्र: {s['age_hours']}h | Size: {s['size_mb']}MB")
             logger.info("║")
@@ -521,13 +689,13 @@ if __name__ == "__main__":
     print("\n🧹 Cleanup पुराने files...")
     cleanup_old_recoveries()
 
-    # Test save
-    print("\n💾 Test checkpoint save...")
+    # Test save (carousel)
+    print("\n💾 Test carousel checkpoint save...")
     save_checkpoint(
-        session_id="test123",
+        session_id="test_carousel_123",
         stage="IMAGES_GENERATED",
         data={
-            "topic":    "Test topic",
+            "topic":    "Test carousel topic",
             "category": "test",
             "post_type": "carousel",
             "slides":   [
@@ -537,20 +705,50 @@ if __name__ == "__main__":
         }
     )
 
+    # 🆕 Test save (reel)
+    print("\n💾 Test reel checkpoint save...")
+    save_checkpoint(
+        session_id="test_reel_456",
+        stage="REEL_VOICE_GENERATED",
+        data={
+            "topic":    "Test reel topic",
+            "category": "krishna",
+            "post_type": "reel",
+            "reel_story": "Test story text",
+            "reel_scenes": [
+                {"scene_number": i, "narration": f"Scene {i} narration"}
+                for i in range(1, 7)
+            ]
+        },
+        voice_bytes=b"fake_mp3_data_for_testing",
+        subtitle_srt="1\n00:00:00,000 --> 00:00:02,000\nTest subtitle\n\n"
+    )
+
     # Test load
     print("\n📂 Test checkpoint load...")
-    loaded = load_checkpoint("test123")
+    loaded = load_checkpoint("test_reel_456")
     if loaded:
-        print(f"✅ Loaded: {loaded['data']['topic']}")
+        print(f"✅ Loaded reel: {loaded['data']['topic']}")
+        print(f"   Voice bytes: {len(loaded.get('voice_bytes', b''))} bytes")
+        print(f"   Subtitles: {len(loaded.get('subtitle_srt', ''))} chars")
 
-    # Test find
-    print("\n🔍 Test find pending...")
-    pending = find_pending_recovery("carousel")
+    # Test savings calculation
+    print("\n💰 Test savings calculation...")
+    savings = calculate_savings("REEL_VOICE_GENERATED")
+    print(f"   Money saved: ₹{savings['money_saved_inr']}")
+    print(f"   Time saved: {savings['time_saved_min']} min")
+    print(f"   Images reused: {savings['images_reused']}")
+    print(f"   TTS reused: {savings['tts_calls_saved']}")
+
+    # Test find (reel)
+    print("\n🔍 Test find pending reel...")
+    pending = find_pending_recovery("reel")
     if pending:
         display_pending_recovery(pending)
 
     # Cleanup test
     print("\n🗑️  Test delete...")
-    delete_checkpoint("test123")
+    delete_checkpoint("test_carousel_123")
+    delete_checkpoint("test_reel_456")
 
     print("\n✅ सारे tests हो गए!")

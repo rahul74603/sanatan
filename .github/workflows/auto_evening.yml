@@ -1,0 +1,104 @@
+name: 🌙 Auto Evening Post (Daily 8 PM IST - Smart)
+
+on:
+  schedule:
+    # Daily 8:00 PM IST (2:30 PM UTC)
+    - cron: '30 14 * * *'
+  
+  # Manual trigger
+  workflow_dispatch:
+
+jobs:
+  post-evening:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60  # 60 min (video building can take time)
+    
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+      
+      - name: 🐍 Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      
+      - name: 🎬 Install FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          ffmpeg -version
+      
+      - name: 📦 Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      - name: 🔤 Verify Hindi fonts
+        run: |
+          if [ ! -f "fonts/NotoSansDevanagari-Bold.ttf" ]; then
+            echo "Downloading Hindi fonts..."
+            mkdir -p fonts
+            curl -o fonts/NotoSansDevanagari-Bold.ttf https://github.com/googlefonts/noto-fonts/raw/main/hinted/ttf/NotoSansDevanagari/NotoSansDevanagari-Bold.ttf
+            curl -o fonts/NotoSansDevanagari-Regular.ttf https://github.com/googlefonts/noto-fonts/raw/main/hinted/ttf/NotoSansDevanagari/NotoSansDevanagari-Regular.ttf
+          fi
+          ls -la fonts/
+      
+      - name: 🔐 Setup Google Cloud credentials
+        run: |
+          echo '${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}' > spiritual-service-account.json
+      
+      - name: 🔐 Setup YouTube OAuth credentials
+        run: |
+          echo '${{ secrets.YOUTUBE_CLIENT_SECRETS_JSON }}' > sanatani_youtube_client_secrets.json
+          if [ ! -z "${{ secrets.YOUTUBE_TOKEN_JSON }}" ]; then
+            echo '${{ secrets.YOUTUBE_TOKEN_JSON }}' > sanatani_youtube_token.json
+          fi
+      
+      - name: ⏰ Random delay (0-30 min for natural posting)
+        run: |
+          DELAY=$((RANDOM % 1800))
+          echo "Waiting $DELAY seconds..."
+          sleep $DELAY
+      
+      - name: 🌙 Run Smart Evening Post (Auto-detects Reel or Carousel)
+        env:
+          # Google Cloud
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          PROJECT_ID: ${{ secrets.PROJECT_ID }}
+          LOCATION: ${{ secrets.LOCATION }}
+          BUCKET_NAME: ${{ secrets.BUCKET_NAME }}
+          GOOGLE_APPLICATION_CREDENTIALS: spiritual-service-account.json
+          
+          # Meta
+          ACCESS_TOKEN: ${{ secrets.ACCESS_TOKEN }}
+          INSTAGRAM_ACCOUNT_ID: ${{ secrets.INSTAGRAM_ACCOUNT_ID }}
+          FACEBOOK_PAGE_ID: ${{ secrets.FACEBOOK_PAGE_ID }}
+          META_APP_ID: ${{ secrets.META_APP_ID }}
+          META_APP_SECRET: ${{ secrets.META_APP_SECRET }}
+          
+          # YouTube (for reel days)
+          YOUTUBE_CHANNEL_ID: ${{ secrets.YOUTUBE_CHANNEL_ID }}
+          YOUTUBE_CLIENT_SECRETS_FILE: sanatani_youtube_client_secrets.json
+          YOUTUBE_TOKEN_FILE: sanatani_youtube_token.json
+        run: |
+          # 🎯 Smart decision: DB checks if today is carousel day
+          python main.py evening-smart
+      
+      - name: 📊 Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: evening-logs-${{ github.run_id }}
+          path: |
+            logs/*.log
+            logs/recovery/
+          retention-days: 7
+          if-no-files-found: ignore
+      
+      - name: 🗑️ Cleanup credentials
+        if: always()
+        run: |
+          rm -f spiritual-service-account.json
+          rm -f sanatani_youtube_client_secrets.json
+          rm -f sanatani_youtube_token.json

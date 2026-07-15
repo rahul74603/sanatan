@@ -9,6 +9,8 @@ Features:
 - Aesthetic scoring
 - Detailed diagnostic report
 - Smart regeneration triggers
+
+V2 UPDATE: Added post_type awareness for reel (9:16) aspect ratio
 """
 import io
 import hashlib
@@ -54,10 +56,15 @@ MIN_DIMENSION = IMAGE_MIN_DIMENSION       # 512px
 IDEAL_DIMENSION = 1024                    # 1024px
 MAX_DIMENSION = 4096                      # 4K
 
-# Aspect ratio (Instagram: 0.8 to 1.91)
+# Aspect ratio - Square posts (Instagram feed)
 MIN_ASPECT_RATIO = 0.75
 MAX_ASPECT_RATIO = 1.35
 IDEAL_ASPECT_RATIO = 1.0                  # Square
+
+# 🆕 Aspect ratio - Reels/Story (9:16 portrait)
+REEL_MIN_ASPECT_RATIO = 0.50    # Slightly under 9:16 (0.5625)
+REEL_MAX_ASPECT_RATIO = 0.65    # Slightly over 9:16
+REEL_IDEAL_ASPECT_RATIO = 0.5625  # Exact 9:16
 
 # Brightness (0-255)
 MIN_BRIGHTNESS = 30                       # Too dark
@@ -129,22 +136,42 @@ def _check_dimensions(img: Image.Image) -> Tuple[int, list, dict]:
     return score_deduction, issues, metrics
 
 
-def _check_aspect_ratio(img: Image.Image) -> Tuple[int, list, dict]:
-    """Check aspect ratio for Instagram compatibility"""
+def _check_aspect_ratio(img: Image.Image, post_type: str = "image") -> Tuple[int, list, dict]:
+    """
+    Check aspect ratio for Instagram compatibility
+
+    Args:
+        img: PIL Image
+        post_type: "image" | "carousel" | "reel"
+            - image/carousel → Square range (0.75-1.35)
+            - reel → Portrait range (0.50-0.65) for 9:16
+    """
     w, h = img.size
     ratio = w / h
     issues = []
     score_deduction = 0
-    metrics = {"aspect_ratio": round(ratio, 3)}
+    metrics = {"aspect_ratio": round(ratio, 3), "post_type": post_type}
 
-    if ratio < MIN_ASPECT_RATIO or ratio > MAX_ASPECT_RATIO:
+    # 🆕 Choose ratio range based on post_type
+    if post_type == "reel":
+        min_ratio = REEL_MIN_ASPECT_RATIO
+        max_ratio = REEL_MAX_ASPECT_RATIO
+        ideal_ratio = REEL_IDEAL_ASPECT_RATIO
+        format_name = "Reel/Story 9:16"
+    else:
+        min_ratio = MIN_ASPECT_RATIO
+        max_ratio = MAX_ASPECT_RATIO
+        ideal_ratio = IDEAL_ASPECT_RATIO
+        format_name = "Feed square"
+
+    if ratio < min_ratio or ratio > max_ratio:
         issues.append(
             f"❌ Bad aspect ratio: {ratio:.2f} "
-            f"(Instagram needs {MIN_ASPECT_RATIO}-{MAX_ASPECT_RATIO})"
+            f"({format_name} needs {min_ratio}-{max_ratio})"
         )
         score_deduction = 20
-    elif abs(ratio - IDEAL_ASPECT_RATIO) > 0.1:
-        issues.append(f"ℹ️ Not square: {ratio:.2f} (ideal: {IDEAL_ASPECT_RATIO})")
+    elif abs(ratio - ideal_ratio) > 0.1:
+        issues.append(f"ℹ️ Not ideal ratio: {ratio:.2f} (ideal: {ideal_ratio})")
         score_deduction = 3
 
     return score_deduction, issues, metrics
@@ -484,9 +511,18 @@ Only return JSON, no other text."""
 # MAIN QUALITY CHECKER
 # ============================================================
 
-def _comprehensive_quality_check(image_bytes: bytes, topic: str = "") -> dict:
+def _comprehensive_quality_check(
+    image_bytes: bytes,
+    topic: str = "",
+    post_type: str = "image"
+) -> dict:
     """
     Run all quality checks and compile results
+
+    Args:
+        image_bytes: Image data
+        topic: Topic (for AI validation)
+        post_type: "image" | "carousel" | "reel" (for aspect ratio check)
     """
     score = 100
     all_issues = []
@@ -545,10 +581,10 @@ def _comprehensive_quality_check(image_bytes: bytes, topic: str = "") -> dict:
     checks_performed.append("dimensions")
 
     # ═══════════════════════════════════════════
-    # CHECK 4: Aspect ratio
+    # CHECK 4: Aspect ratio (post_type aware)
     # ═══════════════════════════════════════════
     logger.debug("Checking aspect ratio...")
-    deduction, issues, metrics = _check_aspect_ratio(img)
+    deduction, issues, metrics = _check_aspect_ratio(img, post_type=post_type)
     score -= deduction
     all_issues.extend(issues)
     all_metrics.update(metrics)
@@ -671,7 +707,7 @@ def _log_quality_report(result: dict):
     logger.info(f"│   📁 File Size    : {metrics.get('file_size_kb', 0)} KB")
     logger.info(f"│   📐 Dimensions   : {metrics.get('width', 0)}x{metrics.get('height', 0)}")
     logger.info(f"│   📷 Megapixels   : {metrics.get('megapixels', 0)} MP")
-    logger.info(f"│   ⚖️  Aspect Ratio : {metrics.get('aspect_ratio', 0)}")
+    logger.info(f"│   ⚖️  Aspect Ratio : {metrics.get('aspect_ratio', 0)} ({metrics.get('post_type', 'image')})")
     logger.info(f"│   💡 Brightness   : {metrics.get('brightness', 0)}/255")
     logger.info(f"│   🎨 Contrast     : {metrics.get('contrast', 0)}")
     logger.info(f"│   🌈 Unique Colors: {metrics.get('unique_colors', 0)}")
@@ -719,13 +755,15 @@ def run(memory: AgentMemory) -> AgentMemory:
         return memory
 
     logger.info(f"🖼️  Analyzing image ({len(memory.image_bytes)} bytes)")
+    logger.info(f"📊 Post type: {memory.post_type}")
 
     # ═══════════════════════════════════════════
     # RUN COMPREHENSIVE ANALYSIS
     # ═══════════════════════════════════════════
     result = _comprehensive_quality_check(
         image_bytes=memory.image_bytes,
-        topic=memory.topic
+        topic=memory.topic,
+        post_type=memory.post_type  # 🆕 Pass post_type for correct aspect ratio check
     )
 
     # ═══════════════════════════════════════════
@@ -777,15 +815,15 @@ def run(memory: AgentMemory) -> AgentMemory:
 # PUBLIC UTILITIES
 # ============================================================
 
-def quick_check(image_bytes: bytes) -> bool:
+def quick_check(image_bytes: bytes, post_type: str = "image") -> bool:
     """Quick pass/fail check without full analysis"""
-    result = _comprehensive_quality_check(image_bytes)
+    result = _comprehensive_quality_check(image_bytes, post_type=post_type)
     return result["passed"]
 
 
-def get_image_score(image_bytes: bytes, topic: str = "") -> int:
+def get_image_score(image_bytes: bytes, topic: str = "", post_type: str = "image") -> int:
     """Get just the quality score (0-100)"""
-    result = _comprehensive_quality_check(image_bytes, topic)
+    result = _comprehensive_quality_check(image_bytes, topic, post_type=post_type)
     return result["score"]
 
 
@@ -804,7 +842,10 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         # Test with provided image
         image_path = sys.argv[1]
+        post_type_arg = sys.argv[2] if len(sys.argv) > 2 else "image"
+
         print(f"Testing: {image_path}")
+        print(f"Post type: {post_type_arg}")
 
         with open(image_path, "rb") as f:
             image_bytes = f.read()
@@ -812,6 +853,7 @@ if __name__ == "__main__":
         test_memory = AgentMemory()
         test_memory.image_bytes = image_bytes
         test_memory.topic = "Lord Krishna playing flute"
+        test_memory.post_type = post_type_arg
 
         result = run(test_memory)
 
@@ -820,5 +862,6 @@ if __name__ == "__main__":
         print(f"📝 Issues: {len(result.quality_issues)}")
 
     else:
-        print("Usage: python -m agents.quality_agent <image_path>")
-        print("Example: python -m agents.quality_agent test.jpg")
+        print("Usage: python -m agents.quality_agent <image_path> [post_type]")
+        print("Example: python -m agents.quality_agent test.jpg image")
+        print("Example: python -m agents.quality_agent reel.jpg reel")

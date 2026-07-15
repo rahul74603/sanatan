@@ -10,6 +10,7 @@ Features:
 - 🆕 पूरी तरह हिंदी logs
 - 🆕 Cost + Time savings tracker
 - 🆕 `recover` CLI command
+- 🆕 V2: Reel pipeline (60-90s video for IG + FB + YouTube)
 """
 import time
 import random
@@ -55,6 +56,46 @@ from agents import (
 
 from agents import carousel_agent
 
+# 🆕 V2: Reel imports (graceful — allows partial phase completion)
+try:
+    from reels import reel_agent
+    REEL_AGENT_AVAILABLE = True
+except ImportError as e:
+    REEL_AGENT_AVAILABLE = False
+    _reel_agent_error = str(e)
+
+# 🆕 V2: Video builder import (Phase 5 — required for reel)
+try:
+    from video_engine import video_builder
+    VIDEO_BUILDER_AVAILABLE = True
+except ImportError as e:
+    VIDEO_BUILDER_AVAILABLE = False
+    _video_builder_error = str(e)
+
+# 🆕 V2: TTS + Subtitles (Phase 4)
+try:
+    from video_engine import tts_engine, subtitle_generator
+    TTS_AVAILABLE = True
+except ImportError as e:
+    TTS_AVAILABLE = False
+    _tts_error = str(e)
+
+# 🆕 V2: Reel engine (Phase 6 — MASTER orchestrator, may not exist yet)
+try:
+    from core import reel_engine
+    REEL_ENGINE_AVAILABLE = True
+except ImportError as e:
+    REEL_ENGINE_AVAILABLE = False
+    _reel_engine_error = str(e)
+
+# 🆕 V2: GCS video upload (Phase 6)
+try:
+    from utils.gcs_helper import upload_video
+    UPLOAD_VIDEO_AVAILABLE = True
+except ImportError as e:
+    UPLOAD_VIDEO_AVAILABLE = False
+    _upload_video_error = str(e)
+
 logger = get_logger("main")
 
 
@@ -77,6 +118,7 @@ AGENT_TIMEOUTS = {
     "publisher": 300,
     "analytics": 120,
     "carousel":  600,
+    "reel":      1800,  # 🆕 30 min for full reel build
 }
 
 
@@ -489,6 +531,9 @@ def _check_and_load_recovery(post_type: str = "carousel") -> Optional[AgentMemor
     """
     पुराने अधूरे session को detect करो और memory में load करो।
     Returns: Memory object अगर recovery मिली, None अगर नहीं।
+
+    Args:
+        post_type: "image" | "carousel" | "reel"
     """
     logger.info("")
     logger.info("🔍 पुराने अधूरे काम की जांच कर रहे हैं...")
@@ -620,7 +665,8 @@ def run_pipeline() -> dict:
                 "fb_post_id":       memory.fb_post_id,
                 "ig_success":       memory.ig_success,
                 "fb_success":       memory.fb_success,
-                "duration_seconds": duration
+                "duration_seconds": duration,
+                "post_type":        "image"
             })
             memory.post_id = post_db_id
             log_success(logger, f"DB में save (ID: {post_db_id})")
@@ -780,7 +826,8 @@ def run_carousel_pipeline(force_new: bool = False) -> dict:
                 "fb_post_id":       memory.carousel_fb_post_id,
                 "ig_success":       memory.carousel_ig_success,
                 "fb_success":       memory.carousel_fb_success,
-                "duration_seconds": duration
+                "duration_seconds": duration,
+                "post_type":        "carousel"
             })
             log_success(logger, f"Carousel DB में save (ID: {post_db_id})")
 
@@ -897,55 +944,580 @@ def run_carousel_pipeline(force_new: bool = False) -> dict:
 
 
 # ============================================================
+# 🆕 V2: REEL PIPELINE (1 PM IST) — WITH RECOVERY
+# ============================================================
+
+def run_reel_pipeline(force_new: bool = False) -> dict:
+    """
+    🎬 Reel Pipeline (1 PM IST daily)
+
+    Flow:
+    1. Health check
+    2. Recovery check (post_type="reel")
+    3. Planner → Research (existing)
+    4. Reel Agent (story + fact_check + scenes + prompts)
+    5. Image generation for 6 scenes (quality checked)
+    6. TTS voice generation
+    7. Subtitle generation
+    8. Video building (Ken Burns + transitions + music + subtitles)
+    9. Upload to GCS
+    10. Caption + Hashtag (existing agents with reel awareness)
+    11. Publisher (IG Reel + FB Reel + YouTube Short)
+    12. Analytics + DB save
+
+    Args:
+        force_new: True तो recovery skip करो
+
+    Returns:
+        Report dict with success status, IDs, timing
+    """
+    start_time = datetime.now()
+
+    logger.info("")
+    log_header(logger, "🎬 DIVINE AUTO POSTER — REEL", char="═")
+    logger.info(f"📅 समय    : {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    log_header(logger, "", char="═")
+
+    # ═══════════════════════════════════════════
+    # 🚨 DEPENDENCY CHECK (Phase 4-7 modules)
+    # ═══════════════════════════════════════════
+
+    missing_modules = []
+
+    if not REEL_AGENT_AVAILABLE:
+        missing_modules.append("reel_agent (Phase 2)")
+
+    if not TTS_AVAILABLE:
+        missing_modules.append("tts_engine + subtitle_generator (Phase 4)")
+
+    if not VIDEO_BUILDER_AVAILABLE:
+        missing_modules.append("video_builder (Phase 5)")
+
+    if not REEL_ENGINE_AVAILABLE:
+        missing_modules.append("reel_engine (Phase 6)")
+
+    if not UPLOAD_VIDEO_AVAILABLE:
+        missing_modules.append("gcs_helper.upload_video (Phase 6)")
+
+    if missing_modules:
+        error_msg = (
+            f"⚠️  Reel pipeline requires missing modules:\n" +
+            "\n".join([f"   • {m}" for m in missing_modules]) +
+            "\n\n📋 Complete missing phases before running reel pipeline."
+        )
+        logger.error(error_msg)
+        return {
+            "session_id": "",
+            "status":     "error",
+            "post_type":  "reel",
+            "message":    "Missing dependencies",
+            "missing_modules": missing_modules,
+            "duration":   0,
+        }
+
+    # ═══════════════════════════════════════════
+    # RECOVERY CHECK
+    # ═══════════════════════════════════════════
+    memory = None
+
+    if not force_new:
+        memory = _check_and_load_recovery(post_type="reel")
+
+    # अगर recovery नहीं मिली — नया memory
+    if memory is None:
+        memory = AgentMemory()
+        memory.post_type = "reel"
+
+    session_id = memory.session_id
+    logger.info(f"🆔 सेशन   : {session_id}")
+    logger.info("")
+
+    agent_results = {}
+
+    try:
+        # Health check
+        is_healthy, issues = _health_check()
+        if not is_healthy and len(issues) > 3:
+            raise Exception(f"System health खराब: {len(issues)} समस्याएं")
+
+        # ═══════════════════════════════════════════
+        # STEP 1: PLANNER (existing, recovery aware)
+        # ═══════════════════════════════════════════
+        if memory.is_recovery and memory.topic:
+            logger.info("⏭️  Planner skip — पुराना topic use कर रहे हैं")
+            logger.info(f"   विषय: {memory.topic[:60]}")
+
+            fake_result = AgentExecutionResult("planner")
+            fake_result.success = True
+            fake_result.duration = 0.0
+            agent_results["planner"] = fake_result
+        else:
+            memory, result = _execute_agent(
+                "planner", planner_agent.run, memory,
+                critical=True, max_retries=2
+            )
+            agent_results["planner"] = result
+
+            # Checkpoint after planner
+            save_checkpoint(
+                session_id=memory.session_id,
+                stage="TOPIC_SELECTED",
+                data={
+                    "topic":       memory.topic,
+                    "category":    memory.category,
+                    "post_type":   "reel",
+                    "is_festival": memory.is_festival,
+                    "festival_name": memory.festival_name,
+                }
+            )
+
+        # ═══════════════════════════════════════════
+        # STEP 2: RESEARCH (existing)
+        # ═══════════════════════════════════════════
+        memory, result = _execute_agent(
+            "research", research_agent.run, memory,
+            critical=False, max_retries=2
+        )
+        agent_results["research"] = result
+
+        # ═══════════════════════════════════════════
+        # STEP 3: REEL ENGINE (MASTER — Phase 6)
+        # ═══════════════════════════════════════════
+        # This handles: story + fact_check + scenes + images + voice + subtitles + video
+        logger.info("🎬 Running reel_engine.build_reel()...")
+
+        try:
+            reel_result = reel_engine.build_reel(
+                topic=memory.topic,
+                category=memory.category,
+                session_id=memory.session_id,
+                resume_state=None if not memory.is_recovery else {
+                    "stage": memory.resumed_from_stage,
+                    "data": memory.to_recovery_dict(),
+                    "slides_bytes": {},
+                    "voice_bytes": memory.reel_voice_bytes,
+                    "subtitle_srt": memory.reel_subtitle_srt,
+                }
+            )
+
+            if not reel_result.get("success"):
+                raise Exception(
+                    f"Reel engine failed: {reel_result.get('error', 'Unknown')}"
+                )
+
+            # Update memory with reel_engine results
+            memory.reel_story = reel_result.get("story", memory.reel_story)
+            memory.reel_scenes = reel_result.get("scenes", memory.reel_scenes)
+            memory.reel_voice_bytes = reel_result.get("voice_bytes", memory.reel_voice_bytes)
+            memory.reel_voice_duration = reel_result.get("voice_duration", memory.reel_voice_duration)
+            memory.reel_subtitle_srt = reel_result.get("subtitle_srt", memory.reel_subtitle_srt)
+            memory.reel_video_bytes = reel_result.get("video_bytes", memory.reel_video_bytes)
+            memory.reel_video_path = reel_result.get("video_path", memory.reel_video_path)
+            memory.reel_duration_seconds = reel_result.get("duration", memory.reel_duration_seconds)
+            memory.reel_video_size_mb = reel_result.get("size_mb", memory.reel_video_size_mb)
+            memory.reel_music_file = reel_result.get("music_file", memory.reel_music_file)
+
+            fake_result = AgentExecutionResult("reel_engine")
+            fake_result.success = True
+            fake_result.duration = reel_result.get("build_time", 0)
+            agent_results["reel_engine"] = fake_result
+
+            logger.info(f"✅ Reel engine done: {memory.reel_duration_seconds}s video")
+
+        except Exception as e:
+            logger.error(f"❌ Reel engine failed: {e}")
+            fake_result = AgentExecutionResult("reel_engine")
+            fake_result.success = False
+            fake_result.error = str(e)
+            agent_results["reel_engine"] = fake_result
+            raise
+
+        # ═══════════════════════════════════════════
+        # STEP 4: UPLOAD VIDEO TO GCS
+        # ═══════════════════════════════════════════
+        if not memory.reel_video_url:
+            logger.info("☁️  Uploading video to GCS...")
+
+            try:
+                if not memory.reel_video_bytes and memory.reel_video_path:
+                    # Read bytes from path
+                    with open(memory.reel_video_path, 'rb') as f:
+                        memory.reel_video_bytes = f.read()
+
+                video_url = upload_video(
+                    video_bytes=memory.reel_video_bytes,
+                    folder="reels"
+                )
+                memory.reel_video_url = video_url
+                logger.info(f"✅ Video uploaded: {video_url}")
+
+                # Checkpoint
+                save_checkpoint(
+                    session_id=memory.session_id,
+                    stage="REEL_VIDEO_UPLOADED",
+                    data=memory.to_recovery_dict()
+                )
+
+            except Exception as e:
+                logger.error(f"❌ Video upload failed: {e}")
+                raise
+
+        # ═══════════════════════════════════════════
+        # STEP 5: CAPTION (existing agent, reel-aware)
+        # ═══════════════════════════════════════════
+        memory, result = _execute_agent(
+            "caption", caption_agent.run, memory,
+            critical=False, max_retries=2
+        )
+        agent_results["caption"] = result
+
+        # ═══════════════════════════════════════════
+        # STEP 6: HASHTAG (existing agent, reel-aware)
+        # ═══════════════════════════════════════════
+        memory, result = _execute_agent(
+            "hashtag", hashtag_agent.run, memory,
+            critical=False, max_retries=1
+        )
+        agent_results["hashtag"] = result
+
+        # ═══════════════════════════════════════════
+        # STEP 7: PUBLISHER (extended for reels)
+        # ═══════════════════════════════════════════
+        _human_like_delay()
+
+        memory, result = _execute_agent(
+            "publisher", publisher_agent.run, memory,
+            critical=False, max_retries=1
+        )
+        agent_results["publisher"] = result
+
+        # ═══════════════════════════════════════════
+        # STEP 8: SAVE TO DB
+        # ═══════════════════════════════════════════
+        end_time = datetime.now()
+        duration = (end_time - start_time).total_seconds()
+
+        try:
+            post_db_id = save_post({
+                "post_date":              start_time.isoformat(),
+                "topic":                  memory.topic,
+                "category":               memory.category,
+                "image_style":            memory.image_style,
+                "image_url":              memory.reel_video_url,  # video URL as image_url for reel
+                "caption":                memory.caption,
+                "hashtags":               memory.hashtags,
+                "ig_post_id":             memory.reel_ig_post_id or memory.ig_post_id,
+                "fb_post_id":             memory.reel_fb_post_id or memory.fb_post_id,
+                "ig_success":             memory.reel_ig_success or memory.ig_success,
+                "fb_success":             memory.reel_fb_success or memory.fb_success,
+                "duration_seconds":       duration,
+                # 🆕 Reel-specific fields
+                "post_type":              "reel",
+                "video_url":              memory.reel_video_url,
+                "yt_post_id":             memory.reel_yt_video_id,
+                "yt_success":             memory.reel_yt_success,
+                "reel_duration_seconds":  memory.reel_duration_seconds,
+                "reel_scenes_count":      len(memory.reel_scenes)
+            })
+            memory.post_id = post_db_id
+            log_success(logger, f"Reel DB में save (ID: {post_db_id})")
+
+        except Exception as e:
+            logger.error(f"❌ DB save विफल: {e}")
+            post_db_id = 0
+
+        # ═══════════════════════════════════════════
+        # STEP 9: ANALYTICS
+        # ═══════════════════════════════════════════
+        if post_db_id > 0:
+            memory, result = _execute_agent(
+                "analytics", analytics_agent.run, memory,
+                critical=False, max_retries=1,
+                post_db_id=post_db_id
+            )
+            agent_results["analytics"] = result
+
+        # ═══════════════════════════════════════════
+        # SUMMARY
+        # ═══════════════════════════════════════════
+        total_duration = (datetime.now() - start_time).total_seconds()
+
+        # Determine overall status (3 platforms now)
+        ig_ok = memory.reel_ig_success
+        fb_ok = memory.reel_fb_success
+        yt_ok = memory.reel_yt_success
+
+        success_count = sum([ig_ok, fb_ok, yt_ok])
+
+        if success_count == 3:
+            status = "success"
+        elif success_count >= 1:
+            status = "partial"
+        else:
+            status = "error"
+
+        status_hindi = {
+            "success": "पूर्ण सफल (3/3) ✅",
+            "partial": f"आंशिक सफल ({success_count}/3) ⚠️",
+            "error":   "विफल ❌"
+        }.get(status, "अज्ञात")
+
+        logger.info("")
+        log_header(logger, "🎬 REEL पाइपलाइन का सारांश", char="═")
+        logger.info(f"स्थिति       : {status_hindi}")
+        if memory.is_recovery:
+            savings = calculate_savings(memory.resumed_from_stage)
+            logger.info(f"♻️  Recovery : हां (Stage: {memory.resumed_from_stage})")
+            logger.info(f"💰 पैसे बचे  : ₹{savings['money_saved_inr']}")
+            logger.info(f"⏱️  समय बचा  : ~{savings['time_saved_min']} मिनट")
+        logger.info(f"📌 विषय      : {memory.topic[:60]}")
+        logger.info(f"📂 श्रेणी     : {memory.category}")
+        logger.info(f"🎬 Video      : {memory.reel_duration_seconds}s, {memory.reel_video_size_mb}MB")
+        logger.info(f"🎵 Music      : {memory.reel_music_file or 'None'}")
+        logger.info(f"🖼️  Scenes    : {len(memory.reel_scenes)}")
+        logger.info("")
+        logger.info("📱 PUBLISHING:")
+        logger.info(
+            f"   {'✅' if ig_ok else '❌'} Instagram Reel: "
+            f"{memory.reel_ig_post_id or 'विफल'}"
+        )
+        logger.info(
+            f"   {'✅' if fb_ok else '❌'} Facebook Reel : "
+            f"{memory.reel_fb_post_id or 'विफल'}"
+        )
+        logger.info(
+            f"   {'✅' if yt_ok else '❌'} YouTube Short : "
+            f"{memory.reel_yt_video_id or 'विफल'}"
+        )
+        logger.info("")
+        logger.info("🤖 AGENTS:")
+        for name, r in agent_results.items():
+            emoji = "✅" if r.success else "❌"
+            logger.info(f"   {emoji} {name:15} : {r.duration}s")
+        logger.info(f"⏱️  कुल समय    : {round(total_duration, 1)}s ({round(total_duration/60, 1)} min)")
+        log_header(logger, "सारांश पूर्ण", char="═")
+
+        return {
+            "session_id":       session_id,
+            "status":           status,
+            "post_type":        "reel",
+            "is_recovery":      memory.is_recovery,
+            "topic":            memory.topic,
+            "category":         memory.category,
+            "video_url":        memory.reel_video_url,
+            "video_size_mb":    memory.reel_video_size_mb,
+            "video_duration":   memory.reel_duration_seconds,
+            "ig_success":       ig_ok,
+            "ig_post_id":       memory.reel_ig_post_id,
+            "fb_success":       fb_ok,
+            "fb_post_id":       memory.reel_fb_post_id,
+            "yt_success":       yt_ok,
+            "yt_video_id":      memory.reel_yt_video_id,
+            "duration":         round(total_duration, 1),
+            "agent_results": {
+                name: {
+                    "success":  r.success,
+                    "duration": r.duration,
+                    "error":    r.error
+                }
+                for name, r in agent_results.items()
+            }
+        }
+
+    except Exception as e:
+        logger.error("")
+        log_header(logger, "💥 REEL पाइपलाइन विफल", char="═")
+        logger.error(f"Error: {e}")
+        logger.error(traceback.format_exc())
+        log_header(logger, "", char="═")
+
+        total_duration = (datetime.now() - start_time).total_seconds()
+
+        return {
+            "session_id": session_id,
+            "status":     "error",
+            "post_type":  "reel",
+            "message":    str(e),
+            "topic":      _safe_get(memory, 'topic', ''),
+            "duration":   round(total_duration, 2),
+            "errors":     _safe_get(memory, 'errors', []) or []
+        }
+
+
+# ============================================================
 # 🆕 MANUAL RECOVERY COMMAND
 # ============================================================
 
 def run_recovery_only() -> dict:
     """
     सिर्फ pending recovery पूरी करो, नई कुछ मत करो
+
+    V2 FIX: Reels के लिए pipeline call करता है (जो अंदर से recovery detect करता है),
+    न कि सीधे publisher को — क्योंकि reels में video build + upload भी बचा हो सकता है।
     """
     logger.info("")
     log_header(logger, "♻️  RECOVERY ONLY MODE", char="═")
     logger.info("")
 
-    memory = _check_and_load_recovery(post_type="carousel")
+    # First check for reel recovery (video pipeline)
+    reel_memory = _check_and_load_recovery(post_type="reel")
 
-    if memory is None:
-        logger.info("✅ कोई pending recovery नहीं")
-        return {
-            "status": "no_recovery",
-            "message": "कोई अधूरा काम नहीं मिला"
+    if reel_memory is not None:
+        logger.info(f"♻️  Reel recovery मिली — full pipeline चला रहे हैं...")
+        logger.info(f"    Session: {reel_memory.session_id}")
+        logger.info(f"    Stage  : {reel_memory.resumed_from_stage}")
+        logger.info("")
+
+        # Call full reel pipeline (it will auto-detect recovery and skip completed stages)
+        try:
+            result = run_reel_pipeline(force_new=False)
+
+            status = result.get("status", "unknown")
+            if status in ["success", "partial"]:
+                return {
+                    "status":       status,
+                    "session_id":   result.get("session_id", ""),
+                    "post_type":    "reel",
+                    "ig_post_id":   result.get("ig_post_id", ""),
+                    "fb_post_id":   result.get("fb_post_id", ""),
+                    "yt_video_id":  result.get("yt_video_id", ""),
+                    "video_url":    result.get("video_url", ""),
+                    "topic":        result.get("topic", ""),
+                    "duration":     result.get("duration", 0),
+                }
+            else:
+                return {
+                    "status":     "failed",
+                    "session_id": result.get("session_id", ""),
+                    "post_type":  "reel",
+                    "message":    result.get("message", "Reel recovery विफल"),
+                }
+        except Exception as e:
+            logger.error(f"Reel recovery विफल: {e}")
+            return {
+                "status": "error",
+                "post_type": "reel",
+                "message": str(e)
+            }
+
+    # Then check for carousel recovery
+    carousel_memory = _check_and_load_recovery(post_type="carousel")
+
+    if carousel_memory is not None:
+        logger.info(f"♻️  Carousel recovery मिली — publisher directly call कर रहे हैं...")
+        logger.info(f"    Session: {carousel_memory.session_id}")
+        logger.info(f"    Stage  : {carousel_memory.resumed_from_stage}")
+        logger.info("")
+
+        # For carousel, publisher can handle it directly (existing behavior)
+        try:
+            carousel_memory = publisher_agent.run(carousel_memory)
+
+            if carousel_memory.ig_success or carousel_memory.fb_success:
+                return {
+                    "status":     "success",
+                    "session_id": carousel_memory.session_id,
+                    "post_type":  "carousel",
+                    "ig_post_id": carousel_memory.carousel_ig_post_id or carousel_memory.ig_post_id,
+                    "fb_post_id": carousel_memory.carousel_fb_post_id or carousel_memory.fb_post_id,
+                    "topic":      carousel_memory.topic,
+                }
+            else:
+                return {
+                    "status":     "failed",
+                    "session_id": carousel_memory.session_id,
+                    "post_type":  "carousel",
+                    "message":    "Recovery भी विफल"
+                }
+        except Exception as e:
+            logger.error(f"Carousel recovery विफल: {e}")
+            return {
+                "status": "error",
+                "post_type": "carousel",
+                "message": str(e)
+            }
+
+    # No recovery found
+    logger.info("✅ कोई pending recovery नहीं")
+    return {
+        "status":  "no_recovery",
+        "message": "कोई अधूरा काम नहीं मिला"
+    }
+
+
+# ============================================================
+# 🆕 V2.1: SMART EVENING POST (Auto Reel OR Carousel)
+# ============================================================
+
+def run_evening_smart() -> dict:
+    """
+    🆕 V2.1: Smart evening post — automatically decides Reel OR Carousel.
+
+    Logic:
+    - Checks database: is today one of the 2 random carousel days?
+    - If YES → runs carousel pipeline
+    - If NO  → runs reel pipeline (Reel #2)
+
+    Used by auto_evening.yml workflow (8 PM daily).
+    """
+    from core.database import (
+        get_todays_content_type,
+        get_carousel_days_this_week,
+        DAY_NAMES
+    )
+
+    logger.info("")
+    log_header(logger, "🌙 SMART EVENING POST (8 PM)", char="═")
+    logger.info("")
+
+    # Get current day info
+    today = datetime.now()
+    today_name = DAY_NAMES[today.weekday()]
+
+    # Get this week's schedule
+    schedule = get_carousel_days_this_week()
+
+    logger.info(f"📅 आज का दिन    : {today_name}")
+    logger.info(f"📅 इस हफ्ते के carousel दिन: {schedule['carousel_day_names']}")
+    logger.info("")
+
+    # Get content type for evening
+    content_type = get_todays_content_type(time_slot="evening")
+
+    logger.info(f"🎯 आज का content: {content_type.upper()}")
+    logger.info("")
+
+    # Route to appropriate pipeline
+    if content_type == "carousel":
+        logger.info("🎠 आज carousel का दिन है — carousel pipeline चला रहे हैं")
+        logger.info("")
+
+        result = run_carousel_pipeline(force_new=True)
+
+        # Add smart routing info
+        result["smart_routing"] = {
+            "decision": "carousel",
+            "reason": f"Today ({today_name}) is a carousel day",
+            "carousel_days_this_week": schedule['carousel_day_names']
         }
 
-    logger.info("♻️  Recovery चला रहे हैं...")
+        return result
 
-    # Publisher directly call करो (सारे data already है)
-    try:
-        memory = publisher_agent.run(memory)
+    else:
+        logger.info("🎬 आज reel का दिन है — reel #2 pipeline चला रहे हैं")
+        logger.info("")
 
-        if memory.ig_success or memory.fb_success:
-            return {
-                "status":     "success",
-                "session_id": memory.session_id,
-                "ig_post_id": memory.carousel_ig_post_id,
-                "fb_post_id": memory.carousel_fb_post_id,
-                "topic":      memory.topic,
-            }
-        else:
-            return {
-                "status": "failed",
-                "session_id": memory.session_id,
-                "message": "Recovery भी विफल"
-            }
+        result = run_reel_pipeline(force_new=True)
 
-    except Exception as e:
-        logger.error(f"Recovery विफल: {e}")
-        return {
-            "status": "error",
-            "message": str(e)
+        # Add smart routing info
+        result["smart_routing"] = {
+            "decision": "reel",
+            "reason": f"Today ({today_name}) is NOT a carousel day",
+            "carousel_days_this_week": schedule['carousel_day_names']
         }
 
-
+        return result
+    
 # ============================================================
 # CLOUD FUNCTION ENTRY POINT
 # ============================================================
@@ -955,6 +1527,7 @@ def auto_post(request):
     """
     Cloud Function HTTP entry point
     ?type=carousel → carousel pipeline
+    ?type=reel     → 🆕 reel pipeline
     ?type=recover  → sirf recovery
     ?type=image    → single image (default)
     """
@@ -965,6 +1538,8 @@ def auto_post(request):
 
         if post_type == "carousel":
             result = run_carousel_pipeline()
+        elif post_type == "reel":
+            result = run_reel_pipeline()  # 🆕 V2
         elif post_type == "recover":
             result = run_recovery_only()
         else:
@@ -1013,6 +1588,14 @@ def _run_cli():
             if issues:
                 for issue in issues:
                     print(f"   • {issue}")
+
+            # 🆕 V2: Check reel dependencies
+            print("\n🎬 REEL DEPENDENCIES:")
+            print(f"   {'✅' if REEL_AGENT_AVAILABLE else '❌'} reel_agent (Phase 2)")
+            print(f"   {'✅' if TTS_AVAILABLE else '❌'} tts_engine + subtitles (Phase 4)")
+            print(f"   {'✅' if VIDEO_BUILDER_AVAILABLE else '❌'} video_builder (Phase 5)")
+            print(f"   {'✅' if REEL_ENGINE_AVAILABLE else '❌'} reel_engine (Phase 6)")
+            print(f"   {'✅' if UPLOAD_VIDEO_AVAILABLE else '❌'} upload_video (Phase 6)")
             return
 
         # ── CAROUSEL ─────────────────────────────────────────
@@ -1040,13 +1623,93 @@ def _run_cli():
 
             sys.exit(0 if status in ["success", "partial"] else 2)
 
-        # ── 🆕 CAROUSEL FORCE NEW (recovery skip) ────────────
+        # ── CAROUSEL FORCE NEW ───────────────────────────────
         elif command == "carousel-new":
             logger.info("🎠 FORCE NEW CAROUSEL (recovery skip)")
             result = run_carousel_pipeline(force_new=True)
             sys.exit(0 if result.get("status") in ["success", "partial"] else 2)
 
-        # ── 🆕 RECOVERY ONLY ──────────────────────────────────
+        # ── 🆕 V2: REEL ──────────────────────────────────────
+        elif command == "reel":
+            logger.info("🎬 MANUAL REEL MODE")
+            result = run_reel_pipeline()
+
+            status = result.get('status', 'unknown')
+            status_hindi = {
+                "success": "पूर्ण सफल",
+                "partial": "आंशिक सफल",
+                "error":   "विफल"
+            }.get(status, status.upper())
+
+            print(f"\n{'✅' if status == 'success' else '⚠️' if status == 'partial' else '❌'} "
+                  f"Reel: {status_hindi}")
+
+            if result.get("missing_modules"):
+                print(f"\n⚠️  Missing modules:")
+                for mod in result["missing_modules"]:
+                    print(f"   • {mod}")
+
+            if result.get("is_recovery"):
+                print("♻️  Recovery से पूरा हुआ!")
+
+            if result.get("video_url"):
+                print(f"🎥 Video URL: {result['video_url']}")
+            if result.get("ig_post_id"):
+                print(f"📸 IG Reel: {result['ig_post_id']}")
+            if result.get("fb_post_id"):
+                print(f"📘 FB Reel: {result['fb_post_id']}")
+            if result.get("yt_video_id"):
+                print(f"📺 YT Short: https://youtube.com/shorts/{result['yt_video_id']}")
+
+            sys.exit(0 if status in ["success", "partial"] else 2)
+
+               # ── 🆕 V2: REEL FORCE NEW ────────────────────────────
+        elif command == "reel-new":
+            logger.info("🎬 FORCE NEW REEL (recovery skip)")
+            result = run_reel_pipeline(force_new=True)
+            sys.exit(0 if result.get("status") in ["success", "partial"] else 2)
+
+        # ── 🆕 V2.1: SMART EVENING (Auto Reel OR Carousel) ───
+        elif command == "evening-smart":
+            logger.info("🌙 SMART EVENING MODE (Auto-detects Reel or Carousel)")
+            result = run_evening_smart()
+
+            status = result.get('status', 'unknown')
+            routing = result.get('smart_routing', {})
+            decision = routing.get('decision', 'unknown')
+
+            print(f"\n🌙 Evening Decision: {decision.upper()}")
+            print(f"📅 Reason: {routing.get('reason', 'N/A')}")
+
+            if decision == "carousel":
+                print(f"\n{'✅' if status == 'success' else '⚠️' if status == 'partial' else '❌'} "
+                      f"Carousel: {status}")
+                if result.get("ig_post_id"):
+                    print(f"📸 IG: {result['ig_post_id']}")
+                if result.get("fb_post_id"):
+                    print(f"📘 FB: {result['fb_post_id']}")
+            else:
+                print(f"\n{'✅' if status == 'success' else '⚠️' if status == 'partial' else '❌'} "
+                      f"Reel: {status}")
+                if result.get("video_url"):
+                    print(f"🎥 Video: {result['video_url']}")
+                if result.get("ig_post_id"):
+                    print(f"📸 IG Reel: {result['ig_post_id']}")
+                if result.get("fb_post_id"):
+                    print(f"📘 FB Reel: {result['fb_post_id']}")
+                if result.get("yt_video_id"):
+                    print(f"📺 YT Short: https://youtube.com/shorts/{result['yt_video_id']}")
+
+            sys.exit(0 if status in ["success", "partial"] else 2)
+
+        # ── 🆕 V2.1: SCHEDULE INFO ───────────────────────────
+        elif command == "schedule":
+            logger.info("📅 WEEKLY SCHEDULE INFO")
+            from core.database import display_schedule
+            display_schedule()
+            return
+
+        # ── RECOVERY ONLY ─────────────────────────────────────
         elif command == "recover":
             logger.info("♻️  RECOVERY ONLY MODE")
             result = run_recovery_only()
@@ -1054,8 +1717,12 @@ def _run_cli():
             status = result.get('status', 'unknown')
             if status == "success":
                 print(f"\n✅ Recovery पूर्ण!")
-                print(f"📸 IG: {result.get('ig_post_id', 'N/A')}")
-                print(f"📘 FB: {result.get('fb_post_id', 'N/A')}")
+                if result.get("ig_post_id"):
+                    print(f"📸 IG: {result['ig_post_id']}")
+                if result.get("fb_post_id"):
+                    print(f"📘 FB: {result['fb_post_id']}")
+                if result.get("yt_video_id"):
+                    print(f"📺 YT: {result['yt_video_id']}")
             elif status == "no_recovery":
                 print(f"\n✅ कोई pending recovery नहीं")
             else:
@@ -1063,13 +1730,13 @@ def _run_cli():
 
             sys.exit(0 if status in ["success", "no_recovery"] else 2)
 
-        # ── 🆕 RECOVERY STATS ─────────────────────────────────
+        # ── RECOVERY STATS ────────────────────────────────────
         elif command == "recovery-stats":
             logger.info("📊 RECOVERY STATS")
             display_recovery_stats()
             return
 
-        # ── 🆕 RECOVERY CLEANUP ───────────────────────────────
+        # ── RECOVERY CLEANUP ──────────────────────────────────
         elif command == "recovery-cleanup":
             logger.info("🧹 RECOVERY CLEANUP")
             deleted = cleanup_old_recoveries()
@@ -1081,68 +1748,69 @@ def _run_cli():
             logger.info("🖼️  MANUAL IMAGE MODE")
             result = run_pipeline()
             sys.exit(0 if result["status"] == "success" else 2)
-        # ── 🆕 COST STATS ────────────────────────────────────
+
+        # ── COST STATS ────────────────────────────────────────
         elif command == "cost":
             logger.info("💰 COST STATS")
             try:
                 from utils.vertex_ai import log_session_stats, estimate_images_remaining
-                
+
                 print("\n" + "═" * 55)
                 print("  💰 आज का खर्च और उपयोग")
                 print("═" * 55)
-                
+
                 log_session_stats()
-                
+
                 remaining = estimate_images_remaining()
                 print(f"\n💵 आज बचा हुआ बजट : ₹{remaining['daily_budget_left_inr']}")
                 print(f"💵 महीने का बचा   : ₹{remaining['monthly_budget_left_inr']}")
-                
+
                 print(f"\n📷 आज कितनी images और बना सकते हैं:")
                 print(f"   Premium (₹2.5): {remaining['images_remaining_today']['premium_2_5rs']}")
                 print(f"   Balanced (₹1.5): {remaining['images_remaining_today']['balanced_1_5rs']}")
                 print(f"   Fast (₹1.0)   : {remaining['images_remaining_today']['fast_1rs']}")
-                
+
                 # Read JSON directly for detailed breakdown
                 import json
                 from pathlib import Path
-                from datetime import datetime
-                
+                from datetime import datetime as dt
+
                 stats_file = Path("logs/vertex_usage.json")
                 if stats_file.exists():
                     with open(stats_file, 'r') as f:
                         stats = json.load(f)
-                    
-                    today = datetime.now().strftime("%Y-%m-%d")
-                    this_month = datetime.now().strftime("%Y-%m")
-                    
+
+                    today = dt.now().strftime("%Y-%m-%d")
+                    this_month = dt.now().strftime("%Y-%m")
+
                     print("\n" + "═" * 55)
                     print("  📊 विस्तृत रिपोर्ट")
                     print("═" * 55)
-                    
+
                     today_data = stats.get("daily", {}).get(today, {})
                     print(f"\n📅 आज ({today}):")
                     print(f"   ✅ सफल images  : {today_data.get('images', 0)}")
                     print(f"   ❌ विफल        : {today_data.get('failed', 0)}")
                     print(f"   💰 कुल खर्च    : ₹{today_data.get('cost', 0):.2f}")
-                    
+
                     month_data = stats.get("monthly", {}).get(this_month, {})
                     print(f"\n📆 इस महीने ({this_month}):")
                     print(f"   ✅ सफल images  : {month_data.get('images', 0)}")
                     print(f"   ❌ विफल        : {month_data.get('failed', 0)}")
                     print(f"   💰 कुल खर्च    : ₹{month_data.get('cost', 0):.2f}")
-                    
+
                     all_time = stats.get("all_time", {})
                     print(f"\n🏆 अब तक कुल:")
                     print(f"   ✅ सफल images  : {all_time.get('successful', 0)}")
                     print(f"   ❌ विफल        : {all_time.get('failed', 0)}")
                     print(f"   💰 कुल खर्च    : ₹{all_time.get('total_cost_inr', 0):.2f}")
-                    
+
                     if all_time.get('successful', 0) > 0:
                         avg = all_time.get('total_cost_inr', 0) / all_time.get('successful', 1)
                         print(f"   📊 Avg per image: ₹{avg:.2f}")
-                
+
                 print("\n" + "═" * 55 + "\n")
-                
+
             except Exception as e:
                 print(f"❌ Cost fetch विफल: {e}")
             return
@@ -1151,21 +1819,34 @@ def _run_cli():
         elif command == "help":
             print("""
 ╔═══════════════════════════════════════════════════╗
-║       DIVINE AUTO POSTER — HELP                   ║
+║       DIVINE AUTO POSTER V2 — HELP                ║
 ╠═══════════════════════════════════════════════════╣
+║  IMAGE COMMANDS:                                  ║
 ║  python main.py                → Single image     ║
 ║  python main.py image          → Single image     ║
-║  python main.py carousel       → Carousel (auto-  ║
-║                                   recovery check) ║
-║  python main.py carousel-new   → Force new (skip  ║
-║                                   recovery)       ║
-║  python main.py recover        → सिर्फ pending    ║
-║                                   recovery run    ║
-║  python main.py recovery-stats → Recovery status  ║
-║  python main.py recovery-cleanup → पुराने delete  ║
+║                                                   ║
+║  CAROUSEL COMMANDS:                               ║
+║  python main.py carousel       → With recovery    ║
+║  python main.py carousel-new   → Skip recovery    ║
+║                                                   ║
+║  🆕 REEL COMMANDS (V2):                           ║
+║  python main.py reel           → With recovery    ║
+║  python main.py reel-new       → Skip recovery    ║
+║                                                   ║
+║  RECOVERY COMMANDS:                               ║
+║  python main.py recover        → Complete pending ║
+║  python main.py recovery-stats → Show status      ║
+║  python main.py recovery-cleanup → Clean old      ║
+║                                                   ║
+║ ║  🆕 V2.1 SMART SCHEDULING:                      ║
+║  python main.py evening-smart  → 8PM auto route   ║
+║  python main.py schedule       → Week's schedule  ║
+║                                                   ║
+║  UTILITIES:                                       ║
 ║  python main.py test           → Config test      ║
-║  python main.py health         → Health check     ║
-║  python main.py help           → यह screen        ║
+║  python main.py health         → Health + deps    ║
+║  python main.py cost           → Cost stats       ║
+║  python main.py help           → This screen      ║
 ╚═══════════════════════════════════════════════════╝
             """)
             return

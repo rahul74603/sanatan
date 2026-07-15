@@ -1,6 +1,8 @@
 """
 Central Configuration - Single Source of Truth
 Production-grade config management with validation, categorization, and safe defaults
+
+V2 UPDATE: Added TTS, Reel Video, YouTube configs
 """
 import os
 from dotenv import load_dotenv
@@ -35,7 +37,7 @@ GEMINI_TOP_P = float(os.getenv("GEMINI_TOP_P", "0.95"))
 
 # ═══════════════════════════════════════════════════════════
 # 🎨 VERTEX AI IMAGEN (Premium Image Generation)
-# 
+#
 # Available models (best to fastest):
 #   • imagen-4.0-generate-preview-06-06  → BEST quality (~₹2.5/image)
 #   • imagen-3.0-generate-002            → BALANCED (~₹1.5/image) [DEFAULT]
@@ -139,9 +141,117 @@ PARALLEL_UPLOAD = os.getenv("PARALLEL_UPLOAD", "false").lower() == "true"
 
 
 # ═══════════════════════════════════════════════════════════
+# 🆕 V2 - GOOGLE CLOUD TEXT-TO-SPEECH (Reels Voice)
+# ═══════════════════════════════════════════════════════════
+TTS_ENABLED = os.getenv("TTS_ENABLED", "true").lower() == "true"
+TTS_LANGUAGE = os.getenv("TTS_LANGUAGE", "hi-IN")
+
+# Hindi Neural2 voices (best quality)
+TTS_VOICE_MALE = os.getenv("TTS_VOICE_MALE", "hi-IN-Neural2-B")
+TTS_VOICE_FEMALE = os.getenv("TTS_VOICE_FEMALE", "hi-IN-Neural2-A")
+
+# Speech parameters
+TTS_SPEAKING_RATE = float(os.getenv("TTS_SPEAKING_RATE", "0.95"))
+TTS_PITCH = float(os.getenv("TTS_PITCH", "0.0"))
+TTS_AUDIO_ENCODING = "MP3"
+
+# Category → Voice gender mapping (User's choice)
+# Krishna/Ram/Shiva/Hanuman/Ganesha = Male
+# Durga/Saraswati/Motherly = Female
+TTS_CATEGORY_VOICE = {
+    "krishna": "male",
+    "shiva": "male",
+    "ram": "male",
+    "hanuman": "male",
+    "ganesha": "male",
+    "durga": "female",
+    "spiritual_nature": "female",
+    "motivational": "male",
+    "temple": "male",
+    "daily_wisdom": "female",
+    "festival": "female",
+    "festival_moments": "female",
+}
+
+
+# ═══════════════════════════════════════════════════════════
+# 🆕 V2 - REEL VIDEO CONFIG
+# ═══════════════════════════════════════════════════════════
+
+# Duration (Instagram Reels max = 90s, YT Shorts max = 60s)
+REEL_DURATION_MIN = int(os.getenv("REEL_DURATION_MIN", "60"))
+REEL_DURATION_MAX = int(os.getenv("REEL_DURATION_MAX", "90"))
+
+# Video specs (9:16 portrait for all platforms)
+REEL_FPS = int(os.getenv("REEL_FPS", "30"))
+REEL_WIDTH = 1080
+REEL_HEIGHT = 1920
+REEL_ASPECT_RATIO = "9:16"
+
+# Story parameters (Hindi narration)
+REEL_STORY_MIN_WORDS = int(os.getenv("REEL_STORY_MIN_WORDS", "150"))
+REEL_STORY_MAX_WORDS = int(os.getenv("REEL_STORY_MAX_WORDS", "180"))
+REEL_NUM_SCENES = int(os.getenv("REEL_NUM_SCENES", "6"))
+
+# Video encoding quality
+REEL_VIDEO_CODEC = "libx264"
+REEL_VIDEO_CRF = 23  # 18-28 range (lower = better quality)
+REEL_VIDEO_PRESET = "medium"
+REEL_AUDIO_CODEC = "aac"
+REEL_AUDIO_BITRATE = "128k"
+
+# Ken Burns effect (subtle zoom animation)
+REEL_KEN_BURNS_ENABLED = True
+REEL_KEN_BURNS_ZOOM = 1.15  # 15% zoom over scene duration
+
+# Transitions between scenes
+REEL_TRANSITION_TYPE = "crossfade"
+REEL_TRANSITION_DURATION = 0.5  # seconds
+
+# Background music (user provides in assets/music/)
+REEL_MUSIC_ENABLED = True
+REEL_MUSIC_VOLUME = 0.15  # 15% (voice dominant)
+REEL_MUSIC_FOLDER = "assets/music"
+
+# Subtitles (word-by-word highlighted)
+REEL_SUBTITLE_ENABLED = True
+REEL_SUBTITLE_FONT_SIZE = 60
+REEL_SUBTITLE_HIGHLIGHT_COLOR = "#FFD700"  # Gold
+REEL_SUBTITLE_BASE_COLOR = "#FFFFFF"       # White
+REEL_SUBTITLE_STROKE_COLOR = "#000000"     # Black outline
+
+# Reel posting time (1 PM IST)
+REEL_POSTING_HOUR = int(os.getenv("REEL_POSTING_HOUR", "13"))
+
+
+# ═══════════════════════════════════════════════════════════
+# 🆕 V2 - YOUTUBE SHORTS
+# ═══════════════════════════════════════════════════════════
+YOUTUBE_ENABLED = os.getenv("YOUTUBE_ENABLED", "true").lower() == "true"
+YOUTUBE_CHANNEL_ID = os.getenv("YOUTUBE_CHANNEL_ID", "")
+
+# OAuth credentials files (project-specific naming)
+YOUTUBE_CLIENT_SECRETS_FILE = os.getenv(
+    "YOUTUBE_CLIENT_SECRETS_FILE",
+    "sanatani_youtube_client_secrets.json"
+)
+YOUTUBE_TOKEN_FILE = os.getenv(
+    "YOUTUBE_TOKEN_FILE",
+    "sanatani_youtube_token.json"
+)
+
+# Upload settings
+YOUTUBE_CATEGORY_ID = "22"  # People & Blogs
+YOUTUBE_PRIVACY_STATUS = os.getenv("YOUTUBE_PRIVACY_STATUS", "public")
+YOUTUBE_MADE_FOR_KIDS = False
+YOUTUBE_UPLOAD_MAX_RETRIES = 3
+
+
+# ═══════════════════════════════════════════════════════════
 # 🎯 FEATURE FLAGS
 # ═══════════════════════════════════════════════════════════
 FEATURES = {
+    # Existing
     "vertex_ai": USE_VERTEX_AI,
     "pollinations_fallback": POLLINATIONS_ENABLED,
     "analytics": ANALYTICS_ENABLED,
@@ -150,6 +260,12 @@ FEATURES = {
     "self_learning": os.getenv("ENABLE_SELF_LEARNING", "true").lower() == "true",
     "festival_detection": os.getenv("ENABLE_FESTIVAL_DETECTION", "true").lower() == "true",
     "smart_scheduling": os.getenv("ENABLE_SMART_SCHEDULING", "true").lower() == "true",
+
+    # 🆕 V2
+    "tts": TTS_ENABLED,
+    "reels": True,
+    "youtube": YOUTUBE_ENABLED,
+    "video_watermark": True,
 }
 
 
@@ -216,6 +332,7 @@ def validate():
         "imagen-4.0-generate-preview-06-06": "₹2.50 (Best quality)",
         "imagen-3.0-generate-002": "₹1.50 (Balanced) ⭐",
         "imagen-3.0-fast-generate-001": "₹1.00 (Fastest)",
+        "imagegeneration@006": "₹1.50 (Stable Imagen 2)",
     }
     est_cost = cost_map.get(VERTEX_MODEL, "Unknown")
     print(f"   Cost/Image    : {est_cost}")
@@ -230,6 +347,32 @@ def validate():
     print(f"   API Version   : {META_API_VERSION}")
     print(f"   IG Account    : {INSTAGRAM_ACCOUNT_ID}")
     print(f"   FB Page       : {FACEBOOK_PAGE_ID}")
+
+    # 🆕 TTS
+    print("\n🎤 GOOGLE CLOUD TTS (Reels Voice)")
+    print(f"   Enabled       : {'✅ YES' if TTS_ENABLED else '❌ NO'}")
+    print(f"   Language      : {TTS_LANGUAGE}")
+    print(f"   Male Voice    : {TTS_VOICE_MALE}")
+    print(f"   Female Voice  : {TTS_VOICE_FEMALE}")
+    print(f"   Speaking Rate : {TTS_SPEAKING_RATE}")
+
+    # 🆕 Reel Video
+    print("\n🎬 REEL VIDEO")
+    print(f"   Duration      : {REEL_DURATION_MIN}-{REEL_DURATION_MAX}s")
+    print(f"   Resolution    : {REEL_WIDTH}x{REEL_HEIGHT} (9:16)")
+    print(f"   FPS           : {REEL_FPS}")
+    print(f"   Scenes        : {REEL_NUM_SCENES}")
+    print(f"   Story Words   : {REEL_STORY_MIN_WORDS}-{REEL_STORY_MAX_WORDS}")
+    print(f"   BG Music Vol  : {int(REEL_MUSIC_VOLUME*100)}%")
+    print(f"   Posting Time  : {REEL_POSTING_HOUR}:00 IST")
+
+    # 🆕 YouTube
+    print("\n📺 YOUTUBE SHORTS")
+    print(f"   Enabled       : {'✅ YES' if YOUTUBE_ENABLED else '❌ NO'}")
+    print(f"   Channel ID    : {YOUTUBE_CHANNEL_ID or '⚠️  NOT SET'}")
+    print(f"   Client Secret : {YOUTUBE_CLIENT_SECRETS_FILE}")
+    print(f"   Token File    : {YOUTUBE_TOKEN_FILE}")
+    print(f"   Privacy       : {YOUTUBE_PRIVACY_STATUS}")
 
     # Schedule
     print("\n⏰ POSTING SCHEDULE")
@@ -283,6 +426,19 @@ def validate():
             f"⚠️  Service account file not found: {GOOGLE_APPLICATION_CREDENTIALS}"
         )
 
+    # 🆕 V2 warnings
+    if YOUTUBE_ENABLED and not YOUTUBE_CHANNEL_ID:
+        warnings.append(
+            "⚠️  YouTube enabled but YOUTUBE_CHANNEL_ID not set in .env. "
+            "YouTube uploads will fail."
+        )
+
+    if YOUTUBE_ENABLED and not os.path.exists(YOUTUBE_CLIENT_SECRETS_FILE):
+        warnings.append(
+            f"⚠️  YouTube client secrets file missing: {YOUTUBE_CLIENT_SECRETS_FILE}. "
+            "Run OAuth setup first."
+        )
+
     if warnings:
         print("\n" + "─" * 60)
         print("⚠️  WARNINGS:")
@@ -321,6 +477,24 @@ def get_config_summary() -> dict:
         "posting": {
             "hours": POSTING_HOURS,
             "posts_per_day": POSTS_PER_DAY
+        },
+        # 🆕 V2 additions
+        "tts": {
+            "enabled": TTS_ENABLED,
+            "language": TTS_LANGUAGE,
+            "male_voice": TTS_VOICE_MALE,
+            "female_voice": TTS_VOICE_FEMALE
+        },
+        "reels": {
+            "duration_range": f"{REEL_DURATION_MIN}-{REEL_DURATION_MAX}s",
+            "resolution": f"{REEL_WIDTH}x{REEL_HEIGHT}",
+            "scenes": REEL_NUM_SCENES,
+            "posting_hour": REEL_POSTING_HOUR
+        },
+        "youtube": {
+            "enabled": YOUTUBE_ENABLED,
+            "channel_id": YOUTUBE_CHANNEL_ID,
+            "privacy": YOUTUBE_PRIVACY_STATUS
         },
         "features": FEATURES
     }

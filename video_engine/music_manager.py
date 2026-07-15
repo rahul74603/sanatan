@@ -1,0 +1,501 @@
+"""
+Music Manager - Select and mix BG music with voice narration
+
+Features:
+- Auto-select BG music from assets/music/ folder
+- Category/mood-based selection (matches file names)
+- Voice + Music mixing (voice dominant, music at 15%)
+- Auto-loop music if shorter than voice
+- Auto-truncate music if longer than voice
+- Fade in/out for music (2s each)
+- Graceful fallback if no music files present
+
+User provides music in assets/music/ folder.
+Recommended naming:
+- peaceful_1.mp3, peaceful_2.mp3 (for peaceful moods)
+- powerful_1.mp3 (for powerful moods)
+- devotional_1.mp3 (general devotional)
+- festive_1.mp3 (festivals)
+"""
+import io
+import random
+from pathlib import Path
+from typing import Optional, Tuple
+
+from pydub import AudioSegment
+
+from config.settings import (
+    REEL_MUSIC_ENABLED,
+    REEL_MUSIC_VOLUME,
+    REEL_MUSIC_FOLDER,
+)
+from utils.logger import get_logger
+
+logger = get_logger("music_manager")
+
+
+# ============================================================
+# CONFIGURATION
+# ============================================================
+
+MUSIC_FOLDER = Path(REEL_MUSIC_FOLDER)
+
+# Volume settings (in dB)
+# Voice: 0 dB (unchanged)
+# Music: -20 dB roughly = 10% volume, -14 dB = ~20%
+MUSIC_VOLUME_DB = -20  # 10% volume (music quiet, voice dominant)
+
+# Fade settings
+MUSIC_FADE_IN_MS = 2000   # 2 seconds fade in
+MUSIC_FADE_OUT_MS = 2000  # 2 seconds fade out
+
+# Supported audio formats
+SUPPORTED_FORMATS = ['.mp3', '.wav', '.m4a', '.ogg', '.aac']
+
+# Category → Music keyword mapping
+CATEGORY_MUSIC_KEYWORDS = {
+    "krishna": ["peaceful", "devotional", "melodic", "flute"],
+    "shiva": ["powerful", "mystical", "cosmic", "meditation"],
+    "hanuman": ["powerful", "energetic", "devotional"],
+    "ganesha": ["auspicious", "festive", "devotional"],
+    "durga": ["powerful", "energetic", "festive"],
+    "ram": ["devotional", "peaceful", "royal"],
+    "spiritual_nature": ["peaceful", "meditation", "ambient"],
+    "motivational": ["energetic", "uplifting", "powerful"],
+    "temple": ["devotional", "peaceful", "sacred"],
+    "daily_wisdom": ["peaceful", "contemplative", "ambient"],
+    "festival": ["festive", "celebration", "joyful"],
+    "festival_moments": ["festive", "celebration", "joyful"],
+}
+
+
+# ============================================================
+# MUSIC FILE DISCOVERY
+# ============================================================
+
+def _get_available_music_files() -> list:
+    """
+    Get list of all available music files in music folder.
+
+    Returns:
+        List of Path objects for all supported audio files
+    """
+    if not MUSIC_FOLDER.exists():
+        logger.warning(f"⚠️  Music folder not found: {MUSIC_FOLDER}")
+        return []
+
+    music_files = []
+    for ext in SUPPORTED_FORMATS:
+        music_files.extend(MUSIC_FOLDER.glob(f"*{ext}"))
+        music_files.extend(MUSIC_FOLDER.glob(f"*{ext.upper()}"))
+
+    return music_files
+
+
+def _select_music_file(category: str = "", mood: str = "") -> Optional[Path]:
+    """
+    Select appropriate music file based on category/mood.
+
+    Strategy:
+    1. Get keywords for category
+    2. Find files matching keywords
+    3. If no match, use random music file
+    4. If no music files at all, return None
+
+    Args:
+        category: Content category
+        mood: Optional mood hint
+
+    Returns:
+        Path to selected music file, or None if no music available
+    """
+    music_files = _get_available_music_files()
+
+    if not music_files:
+        logger.warning("⚠️  No music files found in assets/music/")
+        return None
+
+    logger.info(f"🎵 Found {len(music_files)} music files")
+
+    # Get keywords for category
+    keywords = CATEGORY_MUSIC_KEYWORDS.get(category, [])
+
+    # Also include mood keywords
+    if mood:
+        mood_lower = mood.lower()
+        for mood_word in ["peaceful", "powerful", "festive", "devotional", "energetic"]:
+            if mood_word in mood_lower:
+                keywords.append(mood_word)
+
+    # Filter files matching keywords
+    matching_files = []
+    for music_file in music_files:
+        filename_lower = music_file.stem.lower()
+        for keyword in keywords:
+            if keyword.lower() in filename_lower:
+                matching_files.append(music_file)
+                break
+
+    # Select from matches, or random if no matches
+    if matching_files:
+        selected = random.choice(matching_files)
+        logger.info(f"🎵 Selected matching music: {selected.name} (category: {category})")
+    else:
+        selected = random.choice(music_files)
+        logger.info(f"🎵 Selected random music: {selected.name} (no category match)")
+
+    return selected
+
+
+# ============================================================
+# AUDIO LOADING
+# ============================================================
+
+def _load_audio_from_file(file_path: Path) -> Optional[AudioSegment]:
+    """
+    Load audio file as AudioSegment.
+
+    Args:
+        file_path: Path to audio file
+
+    Returns:
+        AudioSegment or None if loading fails
+    """
+    try:
+        file_ext = file_path.suffix.lower()
+
+        # Map extension to pydub format
+        format_map = {
+            '.mp3': 'mp3',
+            '.wav': 'wav',
+            '.m4a': 'mp4',
+            '.ogg': 'ogg',
+            '.aac': 'aac',
+        }
+
+        fmt = format_map.get(file_ext, 'mp3')
+
+        audio = AudioSegment.from_file(str(file_path), format=fmt)
+
+        logger.debug(f"✅ Loaded audio: {file_path.name} ({audio.duration_seconds:.1f}s)")
+
+        return audio
+
+    except Exception as e:
+        logger.error(f"❌ Failed to load audio {file_path.name}: {e}")
+        return None
+
+
+def _load_audio_from_bytes(audio_bytes: bytes, format: str = "mp3") -> Optional[AudioSegment]:
+    """Load audio from bytes as AudioSegment"""
+    try:
+        audio = AudioSegment.from_file(io.BytesIO(audio_bytes), format=format)
+        return audio
+    except Exception as e:
+        logger.error(f"❌ Failed to load audio from bytes: {e}")
+        return None
+
+
+# ============================================================
+# AUDIO MANIPULATION
+# ============================================================
+
+def _adjust_music_to_duration(
+    music: AudioSegment,
+    target_duration_ms: int
+) -> AudioSegment:
+    """
+    Adjust music to match target duration.
+
+    - If music shorter than target → loop
+    - If music longer than target → truncate
+
+    Args:
+        music: Music AudioSegment
+        target_duration_ms: Target duration in milliseconds
+
+    Returns:
+        AudioSegment matching target duration
+    """
+    music_duration_ms = len(music)
+
+    if music_duration_ms >= target_duration_ms:
+        # Music longer - truncate
+        return music[:target_duration_ms]
+
+    # Music shorter - loop until we exceed target
+    loops_needed = (target_duration_ms // music_duration_ms) + 1
+    looped = music * loops_needed
+
+    # Truncate to exact target
+    return looped[:target_duration_ms]
+
+
+def _apply_music_fades(music: AudioSegment) -> AudioSegment:
+    """Apply fade in and fade out to music"""
+    return music.fade_in(MUSIC_FADE_IN_MS).fade_out(MUSIC_FADE_OUT_MS)
+
+
+def _lower_music_volume(music: AudioSegment, volume_db: int = MUSIC_VOLUME_DB) -> AudioSegment:
+    """
+    Lower music volume for background use.
+
+    Args:
+        music: AudioSegment
+        volume_db: dB to reduce (negative). -20 dB = ~10% volume
+
+    Returns:
+        Quieter AudioSegment
+    """
+    return music + volume_db  # dB addition (negative reduces volume)
+
+
+# ============================================================
+# MAIN MIXING FUNCTION
+# ============================================================
+
+def mix_voice_with_music(
+    voice_bytes: bytes,
+    voice_duration: float,
+    category: str = "",
+    mood: str = ""
+) -> Tuple[bytes, str]:
+    """
+    Mix TTS voice with BG music.
+
+    Voice dominant, music at ~10% volume in background.
+
+    Args:
+        voice_bytes: TTS voice MP3 bytes
+        voice_duration: Voice duration in seconds
+        category: For music selection
+        mood: For music selection (optional)
+
+    Returns:
+        Tuple of (mixed_audio_mp3_bytes, music_file_name_used)
+
+    If music disabled or unavailable, returns voice as-is.
+    """
+    logger.info("=" * 55)
+    logger.info("=== MUSIC MANAGER - MIX ===")
+    logger.info("=" * 55)
+
+    # Check if music enabled
+    if not REEL_MUSIC_ENABLED:
+        logger.info("ℹ️  BG music disabled in config")
+        return voice_bytes, ""
+
+    # Load voice
+    voice_audio = _load_audio_from_bytes(voice_bytes, format="mp3")
+
+    if voice_audio is None:
+        logger.error("❌ Failed to load voice audio")
+        return voice_bytes, ""
+
+    voice_duration_ms = len(voice_audio)
+    logger.info(f"🎤 Voice loaded: {voice_duration_ms/1000:.1f}s")
+
+    # Select music file
+    music_file = _select_music_file(category=category, mood=mood)
+
+    if music_file is None:
+        logger.warning("⚠️  No music available - returning voice only")
+        return voice_bytes, ""
+
+    # Load music
+    music_audio = _load_audio_from_file(music_file)
+
+    if music_audio is None:
+        logger.warning("⚠️  Failed to load music - returning voice only")
+        return voice_bytes, ""
+
+    # Adjust music duration to match voice
+    music_audio = _adjust_music_to_duration(music_audio, voice_duration_ms)
+    logger.info(f"🎵 Music adjusted to: {len(music_audio)/1000:.1f}s")
+
+    # Apply fades
+    music_audio = _apply_music_fades(music_audio)
+
+    # Lower music volume (make it background)
+    music_audio = _lower_music_volume(music_audio)
+    logger.info(f"🔉 Music volume reduced by {abs(MUSIC_VOLUME_DB)} dB")
+
+    # Mix voice + music (overlay)
+    try:
+        logger.info("🎚️  Mixing voice + music...")
+        mixed = voice_audio.overlay(music_audio)
+
+        # Export to MP3 bytes
+        buf = io.BytesIO()
+        mixed.export(
+            buf,
+            format="mp3",
+            bitrate="128k",
+            parameters=["-ac", "2"]  # Stereo
+        )
+        mixed_bytes = buf.getvalue()
+
+        logger.info(f"✅ Mixed audio: {len(mixed_bytes):,} bytes")
+        logger.info(f"   Music file used: {music_file.name}")
+        logger.info("=" * 55)
+
+        return mixed_bytes, music_file.name
+
+    except Exception as e:
+        logger.error(f"❌ Mixing failed: {e}")
+        return voice_bytes, ""
+
+
+# ============================================================
+# UTILITY: LIST AVAILABLE MUSIC
+# ============================================================
+
+def list_available_music() -> list:
+    """
+    Get list of all available music files with details.
+
+    Returns:
+        List of dicts: [{"name": "...", "path": "...", "size_mb": ...}]
+    """
+    files = _get_available_music_files()
+
+    music_list = []
+    for f in files:
+        try:
+            size_bytes = f.stat().st_size
+            music_list.append({
+                "name": f.name,
+                "path": str(f),
+                "size_mb": round(size_bytes / (1024 * 1024), 2),
+            })
+        except Exception:
+            continue
+
+    return music_list
+
+
+def check_music_folder() -> dict:
+    """
+    Check music folder status and available files.
+
+    Returns:
+        Status dict with counts and warnings
+    """
+    status = {
+        "folder_exists": MUSIC_FOLDER.exists(),
+        "folder_path": str(MUSIC_FOLDER.absolute()),
+        "total_files": 0,
+        "total_size_mb": 0.0,
+        "categories_covered": [],
+        "missing_categories": [],
+        "files": [],
+    }
+
+    if not status["folder_exists"]:
+        return status
+
+    files = _get_available_music_files()
+    status["total_files"] = len(files)
+
+    total_bytes = sum(f.stat().st_size for f in files)
+    status["total_size_mb"] = round(total_bytes / (1024 * 1024), 2)
+
+    # Check which categories have matching files
+    for category, keywords in CATEGORY_MUSIC_KEYWORDS.items():
+        has_match = False
+        for f in files:
+            if any(kw.lower() in f.stem.lower() for kw in keywords):
+                has_match = True
+                break
+
+        if has_match:
+            status["categories_covered"].append(category)
+        else:
+            status["missing_categories"].append(category)
+
+    # Add file details
+    for f in files:
+        status["files"].append({
+            "name": f.name,
+            "size_mb": round(f.stat().st_size / (1024 * 1024), 2)
+        })
+
+    return status
+
+
+# ============================================================
+# STANDALONE TESTING
+# ============================================================
+
+if __name__ == "__main__":
+    print("\n" + "=" * 60)
+    print("MUSIC MANAGER - STANDALONE TEST")
+    print("=" * 60 + "\n")
+
+    # Check music folder
+    print("📁 Checking music folder...")
+    status = check_music_folder()
+
+    print(f"   Folder: {status['folder_path']}")
+    print(f"   Exists: {status['folder_exists']}")
+    print(f"   Total files: {status['total_files']}")
+    print(f"   Total size: {status['total_size_mb']} MB")
+
+    if status['total_files'] == 0:
+        print("\n⚠️  NO MUSIC FILES FOUND!")
+        print(f"   Please add MP3 files to: {status['folder_path']}")
+        print("\n   Recommended files:")
+        print("   - peaceful_1.mp3 (for Krishna, peaceful topics)")
+        print("   - powerful_1.mp3 (for Shiva, motivational)")
+        print("   - devotional_1.mp3 (general devotional)")
+        print("   - festive_1.mp3 (for festivals)")
+        print("\n   Where to get free devotional music:")
+        print("   - YouTube Audio Library")
+        print("   - Pixabay Music")
+        print("   - Free Music Archive")
+        exit(0)
+
+    print("\n📋 Available music files:")
+    for f in status['files']:
+        print(f"   • {f['name']} ({f['size_mb']} MB)")
+
+    print(f"\n✅ Categories covered ({len(status['categories_covered'])}):")
+    for cat in status['categories_covered']:
+        print(f"   • {cat}")
+
+    if status['missing_categories']:
+        print(f"\n⚠️  Categories without matching music ({len(status['missing_categories'])}):")
+        for cat in status['missing_categories']:
+            print(f"   • {cat}")
+
+    # Test mixing if we have a test voice file
+    test_voice_file = Path("test_reel_voice.mp3")
+    if test_voice_file.exists():
+        print(f"\n🎤 Test mixing with {test_voice_file.name}...")
+
+        with open(test_voice_file, 'rb') as f:
+            voice_bytes = f.read()
+
+        # Estimate duration (very rough)
+        voice_duration = len(voice_bytes) / 16000  # ~128kbps
+
+        mixed_bytes, music_used = mix_voice_with_music(
+            voice_bytes=voice_bytes,
+            voice_duration=voice_duration,
+            category="krishna"
+        )
+
+        if music_used:
+            output_file = "test_mixed_audio.mp3"
+            with open(output_file, 'wb') as f:
+                f.write(mixed_bytes)
+            print(f"\n✅ Mixed audio saved: {output_file}")
+            print(f"   Music used: {music_used}")
+            print(f"   Original voice: {len(voice_bytes):,} bytes")
+            print(f"   Mixed audio: {len(mixed_bytes):,} bytes")
+            print(f"\n💡 Play mixed audio: start {output_file}")
+        else:
+            print("\n⚠️  Mixing skipped (no music available)")
+    else:
+        print(f"\nℹ️  No test voice file found: {test_voice_file}")
+        print("   Run tts_engine.py first to generate test_reel_voice.mp3")

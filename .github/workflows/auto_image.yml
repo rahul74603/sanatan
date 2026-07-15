@@ -1,11 +1,9 @@
-name: 🖼️ Auto Single Image Post
+name: 📸 Auto Image Post (Daily 8 AM IST)
 
 on:
   schedule:
-    # Morning: 08:00 IST (02:30 UTC)
+    # Daily 8:00 AM IST (2:30 AM UTC)
     - cron: '30 2 * * *'
-    # Evening: 17:30 IST (12:00 UTC)
-    - cron: '0 12 * * *'
   
   # Manual trigger (mobile se run kar sakte ho)
   workflow_dispatch:
@@ -34,13 +32,13 @@ jobs:
         run: |
           echo '${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}' > spiritual-service-account.json
       
-      - name: ⏰ Random delay (0-30 min)
+      - name: ⏰ Random delay (0-15 min for natural posting)
         run: |
-          DELAY=$((RANDOM % 1800))
-          echo "Waiting $DELAY seconds..."
+          DELAY=$((RANDOM % 900))
+          echo "Waiting $DELAY seconds for natural posting time..."
           sleep $DELAY
       
-      - name: 🖼️ Run Single Image Post
+      - name: 📸 Run Image Post
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           ACCESS_TOKEN: ${{ secrets.ACCESS_TOKEN }}
@@ -54,6 +52,15 @@ jobs:
           GOOGLE_APPLICATION_CREDENTIALS: spiritual-service-account.json
         run: |
           python main.py image
+      
+      - name: 📊 Upload logs (for debugging)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-logs-${{ github.run_id }}
+          path: logs/*.log
+          retention-days: 3
+          if-no-files-found: ignore
       
       - name: 🗑️ Cleanup credentials
         if: always()
