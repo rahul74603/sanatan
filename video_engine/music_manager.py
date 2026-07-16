@@ -1,7 +1,13 @@
 """
-Music Manager - Select and mix BG music with voice narration
+Music Manager V2 - Fixed Voice Duration Bug
 
-Features:
+CRITICAL FIX (V2):
+- Voice duration ab correctly detect hoti hai (was using pydub's unreliable len())
+- Falls back to passed voice_duration parameter (from TTS engine)
+- Validates duration before mixing
+- Music duration always matches actual voice length
+
+FEATURES (ALL PRESERVED FROM V1):
 - Auto-select BG music from assets/music/ folder
 - Category/mood-based selection (matches file names)
 - Voice + Music mixing (voice dominant, music at 15%)
@@ -9,6 +15,7 @@ Features:
 - Auto-truncate music if longer than voice
 - Fade in/out for music (2s each)
 - Graceful fallback if no music files present
+- V4: Dynamic volume per category
 
 User provides music in assets/music/ folder.
 Recommended naming:
@@ -165,8 +172,7 @@ def _select_music_file(category: str = "", mood: str = "") -> Optional[Path]:
 
     logger.info(f"🎵 Found {len(music_files)} music files")
 
-    
-      # 🆕 V4: Get keywords from new dict structure
+    # 🆕 V4: Get keywords from new dict structure
     cat_config = CATEGORY_MUSIC_KEYWORDS.get(category, {})
     if isinstance(cat_config, dict):
         keywords = cat_config.get("keywords", [])
@@ -250,6 +256,59 @@ def _load_audio_from_bytes(audio_bytes: bytes, format: str = "mp3") -> Optional[
 
 
 # ============================================================
+# 🆕 V2: DURATION VALIDATION (Critical Fix)
+# ============================================================
+
+def _get_reliable_voice_duration(
+    voice_audio: AudioSegment,
+    voice_duration_hint: float = 0
+) -> int:
+    """
+    🆕 V2: Get reliable voice duration in milliseconds.
+    
+    pydub sometimes reports wrong duration for MP3 files (VBR issues).
+    We use the passed hint from TTS engine (which knows real duration)
+    as fallback if pydub's value seems suspicious.
+    
+    Args:
+        voice_audio: AudioSegment from pydub
+        voice_duration_hint: Actual duration from TTS engine (seconds)
+    
+    Returns:
+        Reliable duration in milliseconds
+    """
+    pydub_duration_ms = len(voice_audio)
+    pydub_duration_sec = pydub_duration_ms / 1000.0
+    
+    logger.info(f"🎤 pydub reports voice: {pydub_duration_sec:.1f}s")
+    
+    # If no hint provided, trust pydub
+    if voice_duration_hint <= 0:
+        logger.info(f"   ⚠️  No hint provided, using pydub value")
+        return pydub_duration_ms
+    
+    logger.info(f"🎯 TTS engine says voice: {voice_duration_hint:.1f}s")
+    
+    # Check if pydub's value seems reliable
+    # Voice should be within 15% of TTS engine's estimate
+    hint_ms = int(voice_duration_hint * 1000)
+    diff_ratio = abs(pydub_duration_ms - hint_ms) / hint_ms
+    
+    if diff_ratio > 0.15:
+        # More than 15% difference — pydub is wrong (common MP3 VBR issue)
+        logger.warning(
+            f"⚠️  pydub duration seems wrong! "
+            f"pydub={pydub_duration_sec:.1f}s vs TTS={voice_duration_hint:.1f}s "
+            f"(diff: {diff_ratio*100:.0f}%). Using TTS engine value."
+        )
+        return hint_ms
+    
+    # Values are close enough, use pydub
+    logger.info(f"   ✅ pydub value acceptable (diff: {diff_ratio*100:.0f}%)")
+    return pydub_duration_ms
+
+
+# ============================================================
 # AUDIO MANIPULATION
 # ============================================================
 
@@ -307,7 +366,37 @@ def _lower_music_volume(music: AudioSegment, volume_db: int = MUSIC_VOLUME_DB, c
 
 
 # ============================================================
-# MAIN MIXING FUNCTION
+# 🆕 V2: EXTEND VOICE TO MATCH DURATION (Critical Fix)
+# ============================================================
+
+def _extend_voice_if_needed(
+    voice_audio: AudioSegment,
+    target_duration_ms: int
+) -> AudioSegment:
+    """
+    🆕 V2: If voice is shorter than target duration,
+    pad with silence at the end (natural pause).
+    
+    This ensures video-voice sync doesn't fail.
+    """
+    voice_duration_ms = len(voice_audio)
+    
+    if voice_duration_ms >= target_duration_ms:
+        return voice_audio  # Already long enough
+    
+    # Add silence to extend voice
+    silence_needed_ms = target_duration_ms - voice_duration_ms
+    logger.info(
+        f"🔧 Extending voice with {silence_needed_ms/1000:.1f}s silence "
+        f"({voice_duration_ms/1000:.1f}s → {target_duration_ms/1000:.1f}s)"
+    )
+    
+    silence = AudioSegment.silent(duration=silence_needed_ms)
+    return voice_audio + silence
+
+
+# ============================================================
+# MAIN MIXING FUNCTION (V2 FIXED)
 # ============================================================
 
 def mix_voice_with_music(
@@ -320,10 +409,15 @@ def mix_voice_with_music(
     Mix TTS voice with BG music.
 
     Voice dominant, music at ~10% volume in background.
+    
+    V2 FIXES:
+    - Reliable voice duration (uses TTS engine hint as source of truth)
+    - Voice extension if pydub reports wrong duration
+    - Better logging for debugging
 
     Args:
         voice_bytes: TTS voice MP3 bytes
-        voice_duration: Voice duration in seconds
+        voice_duration: Voice duration in seconds (from TTS engine - RELIABLE)
         category: For music selection
         mood: For music selection (optional)
 
@@ -333,8 +427,10 @@ def mix_voice_with_music(
     If music disabled or unavailable, returns voice as-is.
     """
     logger.info("=" * 55)
-    logger.info("=== MUSIC MANAGER - MIX ===")
+    logger.info("=== MUSIC MANAGER V2 - MIX ===")
     logger.info("=" * 55)
+    logger.info(f"📥 Voice bytes: {len(voice_bytes):,}")
+    logger.info(f"📥 Voice duration hint: {voice_duration:.1f}s")
 
     # Check if music enabled
     if not REEL_MUSIC_ENABLED:
@@ -348,15 +444,29 @@ def mix_voice_with_music(
         logger.error("❌ Failed to load voice audio")
         return voice_bytes, ""
 
-    voice_duration_ms = len(voice_audio)
-    logger.info(f"🎤 Voice loaded: {voice_duration_ms/1000:.1f}s")
+    # 🚨 V2 CRITICAL FIX: Get reliable voice duration
+    voice_duration_ms = _get_reliable_voice_duration(
+        voice_audio=voice_audio,
+        voice_duration_hint=voice_duration
+    )
+    
+    logger.info(f"✅ Final voice duration: {voice_duration_ms/1000:.1f}s")
+
+    # 🚨 V2 CRITICAL FIX: Extend voice if pydub loaded less than expected
+    voice_audio = _extend_voice_if_needed(voice_audio, voice_duration_ms)
 
     # Select music file
     music_file = _select_music_file(category=category, mood=mood)
 
     if music_file is None:
         logger.warning("⚠️  No music available - returning voice only")
-        return voice_bytes, ""
+        # Still export the (possibly extended) voice
+        try:
+            buf = io.BytesIO()
+            voice_audio.export(buf, format="mp3", bitrate="128k")
+            return buf.getvalue(), ""
+        except Exception:
+            return voice_bytes, ""
 
     # Load music
     music_audio = _load_audio_from_file(music_file)
@@ -365,16 +475,16 @@ def mix_voice_with_music(
         logger.warning("⚠️  Failed to load music - returning voice only")
         return voice_bytes, ""
 
-    # Adjust music duration to match voice
+    # Adjust music duration to match voice (now using RELIABLE duration)
     music_audio = _adjust_music_to_duration(music_audio, voice_duration_ms)
     logger.info(f"🎵 Music adjusted to: {len(music_audio)/1000:.1f}s")
 
     # Apply fades
     music_audio = _apply_music_fades(music_audio)
 
-     # 🆕 V4: Dynamic volume based on category
+    # 🆕 V4: Dynamic volume based on category
     music_audio = _lower_music_volume(music_audio, category=category)
-    logger.info(f"🔉 Music volume reduced by {abs(MUSIC_VOLUME_DB)} dB")
+    logger.info(f"🔉 Music volume applied for category: {category}")
 
     # Mix voice + music (overlay)
     try:
@@ -392,6 +502,7 @@ def mix_voice_with_music(
         mixed_bytes = buf.getvalue()
 
         logger.info(f"✅ Mixed audio: {len(mixed_bytes):,} bytes")
+        logger.info(f"   Final duration: {len(mixed)/1000:.1f}s")
         logger.info(f"   Music file used: {music_file.name}")
         logger.info("=" * 55)
 
@@ -457,7 +568,13 @@ def check_music_folder() -> dict:
     status["total_size_mb"] = round(total_bytes / (1024 * 1024), 2)
 
     # Check which categories have matching files
-    for category, keywords in CATEGORY_MUSIC_KEYWORDS.items():
+    for category, config in CATEGORY_MUSIC_KEYWORDS.items():
+        # Handle both new dict format and old list format
+        if isinstance(config, dict):
+            keywords = config.get("keywords", [])
+        else:
+            keywords = config
+        
         has_match = False
         for f in files:
             if any(kw.lower() in f.stem.lower() for kw in keywords):
@@ -485,7 +602,7 @@ def check_music_folder() -> dict:
 
 if __name__ == "__main__":
     print("\n" + "=" * 60)
-    print("MUSIC MANAGER - STANDALONE TEST")
+    print("MUSIC MANAGER V2 - STANDALONE TEST")
     print("=" * 60 + "\n")
 
     # Check music folder
@@ -555,3 +672,12 @@ if __name__ == "__main__":
     else:
         print(f"\nℹ️  No test voice file found: {test_voice_file}")
         print("   Run tts_engine.py first to generate test_reel_voice.mp3")
+
+    print("\n" + "=" * 60)
+    print("V2 CRITICAL FIXES:")
+    print("=" * 60)
+    print("   1. Reliable voice duration (uses TTS engine hint)")
+    print("   2. Voice extension with silence if pydub reports wrong duration")
+    print("   3. Better logging for debugging")
+    print("   4. Fixes 20s video-voice cut bug")
+    print("=" * 60)
