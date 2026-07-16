@@ -1165,7 +1165,7 @@ def run_reel_pipeline(force_new: bool = False) -> dict:
                 logger.error(f"❌ Video upload failed: {e}")
                 raise
 
-        # ═══════════════════════════════════════════
+              # ═══════════════════════════════════════════
         # STEP 5: CAPTION (existing agent, reel-aware)
         # ═══════════════════════════════════════════
         memory, result = _execute_agent(
@@ -1173,6 +1173,19 @@ def run_reel_pipeline(force_new: bool = False) -> dict:
             critical=False, max_retries=2
         )
         agent_results["caption"] = result
+
+        # ═══════════════════════════════════════════
+        # 🆕 STEP 5.5: SEO AGENT (optimize for all platforms)
+        # ═══════════════════════════════════════════
+        try:
+            from agents.seo_agent import run as run_seo
+            memory, result = _execute_agent(
+                "seo", run_seo, memory,
+                critical=False, max_retries=1
+            )
+            agent_results["seo"] = result
+        except ImportError:
+            logger.warning("⚠️  SEO agent not available")
 
         # ═══════════════════════════════════════════
         # STEP 6: HASHTAG (existing agent, reel-aware)
