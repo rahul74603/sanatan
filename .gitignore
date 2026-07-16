@@ -78,7 +78,7 @@ test_reel.mp4
 test_output.*
 
 # 🎵 Assets (music/media files - too big for git)
-assets/music/*.mp3
+
 assets/music/*.wav
 assets/music/*.m4a
 assets/intro/*.mp4
