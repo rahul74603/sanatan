@@ -1,17 +1,15 @@
 """
-Reply Generator - AI-powered contextual reply generation
+Reply Generator V4 - Fixed prompt-echoing bug
 
-V3 Features:
-- Detects comment intent (praise/question/feedback/request)
-- Generates personalized Hindi replies
-- Uses commenter's name
-- Matches brand voice (Sanatani Soch)
-- Never sounds robotic
-- Includes relevant emojis
-- Rate limits Gemini calls
+FIXES:
+- Prompt echo detection (rejects reply if it contains prompt text)
+- Better validation (Hindi/emoji required)
+- Cleaner prompt (less confusion)
+- Auto-fallback on suspicious reply
 """
 import re
 import time
+import random
 import google.generativeai as genai
 
 from config.settings import GEMINI_API_KEY, GEMINI_MODEL
@@ -26,35 +24,22 @@ logger = get_logger("reply_generator")
 # ============================================================
 
 def _detect_intent(comment_text: str) -> str:
-    """
-    Detect comment intent.
-
-    Returns:
-    - "praise": Positive comment (Har Har Mahadev, Beautiful, etc.)
-    - "question": Asking something
-    - "request": Asking for specific content
-    - "story": Sharing personal experience
-    - "criticism": Negative feedback
-    - "greeting": Simple greeting (Jai Shri Ram etc.)
-    - "generic": Anything else
-    """
+    """Detect comment intent"""
     text_lower = comment_text.lower()
 
-    # Question
     if '?' in comment_text or 'kya' in text_lower or 'kaise' in text_lower or 'kyun' in text_lower:
         return "question"
 
-    # Greeting / Devotional phrases
     greetings = [
         "har har mahadev", "jai shri ram", "radhe radhe", "jai mata di",
         "om namah shivaya", "ganpati bappa", "jai hanuman", "jai shri krishna",
-        "hare krishna", "jai bajrangbali", "jai ganesh", "🙏", "🕉️", "🚩"
+        "hare krishna", "jai bajrangbali", "jai ganesh", "jai ho",
+        "jai shree krishna", "jai shree ram", "🙏", "🕉️", "🚩"
     ]
     for greeting in greetings:
         if greeting in text_lower:
             return "greeting"
 
-    # Praise
     praise_words = [
         "beautiful", "amazing", "wonderful", "great", "nice", "superb",
         "bahut achha", "bahut sundar", "bahut achhi", "kamaal", "zabardast",
@@ -64,7 +49,6 @@ def _detect_intent(comment_text: str) -> str:
         if word in text_lower:
             return "praise"
 
-    # Request
     request_words = [
         "please make", "banao", "banaiye", "chahiye", "aur do",
         "next video", "agle video", "request", "topic"
@@ -73,12 +57,10 @@ def _detect_intent(comment_text: str) -> str:
         if word in text_lower:
             return "request"
 
-    # Personal story
     if any(word in text_lower for word in ["mera", "meri", "mere", "main", "humne", "hamne"]):
         if len(comment_text.split()) > 5:
             return "story"
 
-    # Criticism
     if any(word in text_lower for word in ["galat", "wrong", "fake", "bekar", "bakwas"]):
         return "criticism"
 
@@ -86,7 +68,7 @@ def _detect_intent(comment_text: str) -> str:
 
 
 # ============================================================
-# REPLY TEMPLATES (Fallback if Gemini fails)
+# REPLY TEMPLATES (Fallback)
 # ============================================================
 
 REPLY_TEMPLATES = {
@@ -94,6 +76,8 @@ REPLY_TEMPLATES = {
         "🙏 {name} जी, आपका बहुत धन्यवाद! भगवान आपको सदा प्रसन्न रखें 🕉️",
         "🙏 {name} जी! आपका प्यार ही हमारी ताकत है ✨",
         "जय हो {name} जी! 🙏 भगवान की कृपा आप पर बनी रहे 🌸",
+        "🙏 {name} जी, जय श्री कृष्ण! भगवान आपके साथ हैं 🌸",
+        "🕉️ {name} जी, हर हर महादेव! शिवजी की कृपा बनी रहे ✨",
     ],
     "praise": [
         "🙏 {name} जी, आपके इतने प्यार के लिए बहुत बहुत धन्यवाद! ✨",
@@ -118,73 +102,100 @@ REPLY_TEMPLATES = {
     "generic": [
         "🙏 {name} जी, धन्यवाद! भगवान की कृपा आप पर बनी रहे ✨",
         "{name} जी, शुक्रिया! 🙏 ऐसे ही हमारे साथ जुड़े रहिए 🌸",
+        "🙏 {name} जी, आपका प्यार बना रहे! जय श्री कृष्ण ✨",
     ]
 }
 
 
 # ============================================================
-# AI REPLY GENERATION
+# 🆕 V4: REPLY VALIDATION (Detects Prompt Echo)
+# ============================================================
+
+# Words that should NEVER appear in a real reply (indicate prompt echo)
+PROMPT_ECHO_MARKERS = [
+    "output only", "reply text", "generate", "instruction",
+    "rules:", "example", "do not", "as an ai", "language model",
+    "here is", "here's your", "sure!", "of course",
+    "reply:", "comment:", "user:", "assistant:",
+    "spiritual hindi page", "admin ho", "intent:",
+    "प्रॉम्प्ट", "instructions", "```",
+]
+
+
+def _is_valid_reply(reply: str, original_comment: str = "") -> tuple[bool, str]:
+    """
+    Validate AI-generated reply.
+    
+    Returns:
+        (is_valid, reason)
+    """
+    if not reply or not reply.strip():
+        return False, "empty"
+    
+    reply_lower = reply.lower().strip()
+    
+    # Too short
+    if len(reply.strip()) < 15:
+        return False, f"too_short ({len(reply)} chars)"
+    
+    # Too long (probably prompt echo)
+    if len(reply.strip()) > 400:
+        return False, f"too_long ({len(reply)} chars)"
+    
+    # 🚨 Prompt echo detection
+    for marker in PROMPT_ECHO_MARKERS:
+        if marker.lower() in reply_lower:
+            return False, f"prompt_echo (contains '{marker}')"
+    
+    # Must contain either Hindi/Devanagari OR emoji
+    has_hindi = any('\u0900' <= c <= '\u097F' for c in reply)
+    has_emoji = bool(re.search(
+        r'[\U0001F300-\U0001FFFF\U00002600-\U000027BF\U0001F600-\U0001F9FF]',
+        reply
+    ))
+    
+    if not has_hindi and not has_emoji:
+        return False, "no_hindi_no_emoji (looks like English instruction)"
+    
+    # Reply should NOT be same as comment (echo)
+    if original_comment and reply.strip().lower() == original_comment.strip().lower():
+        return False, "identical_to_comment"
+    
+    return True, "valid"
+
+
+# ============================================================
+# AI REPLY GENERATION (Fixed Prompt)
 # ============================================================
 
 def _generate_ai_reply(comment: dict, intent: str) -> str:
-    """
-    Generate contextual reply using Gemini.
-
-    Args:
-        comment: Comment dict with text, username, platform
-        intent: Detected intent
-
-    Returns:
-        Reply text (Hindi)
-    """
+    """Generate contextual reply using Gemini"""
     username = comment.get('username', 'भक्त')
     text = comment.get('text', '')
-    platform = comment.get('platform', 'instagram')
 
-    prompt = f"""तुम एक spiritual Hindi page "सनातनी सोच" (@sanatanii_soch) के admin हो।
+    # 🆕 V4: Simpler, cleaner prompt (less confusion for AI)
+    prompt = f"""तुम "सनातनी सोच" spiritual page के admin हो। एक Hindi reply लिखो।
 
-एक {platform} comment का reply लिखो:
+User @{username} ने comment किया: "{text}"
 
-Comment by @{username}: "{text}"
-Intent: {intent}
+Reply लिखने के नियम:
+- सिर्फ Hindi में (आसान भाषा)
+- 2-3 lines maximum
+- {username} जी का नाम use करो
+- 1-2 emoji: 🙏 ✨ 🕉️ 🌸 🚩 ❤️
+- Warm, personal tone
+- कोई English वाक्य नहीं
+- कोई hashtag नहीं
+- कोई link नहीं
 
-═══════════════════════════════════════════
-📏 REPLY RULES:
-═══════════════════════════════════════════
+Examples:
+User: "Har Har Mahadev 🙏"
+Reply: 🙏 भाई जी, हर हर महादेव! भोलेनाथ आपकी सारी मनोकामनाएं पूरी करें 🕉️
 
-1. ✅ Hindi में reply करो (आसान भाषा)
-2. ✅ Maximum 2-3 lines (short aur sweet)
-3. ✅ Commenter का naam use करो: "{username} जी"
-4. ✅ 1-2 emojis add करो (🙏 ✨ 🕉️ 🌸 🚩)
-5. ✅ Warm, personal, caring tone
-6. ✅ Page ka naam mat likho (they already know)
+User: "Beautiful video"
+Reply: बहुत शुक्रिया! 🙏 आपका प्यार ही हमारी ताकत है ✨
 
-❌ DO NOT:
-- English sentences (except name)
-- Long paragraphs
-- Generic copy-paste replies
-- Hashtags
-- Links
-- Promotional tone
-- "AI generated" feel
-- "As an AI" phrases
-
-═══════════════════════════════════════════
-EXAMPLE GOOD REPLIES:
-═══════════════════════════════════════════
-
-Comment: "Har Har Mahadev 🙏"
-Reply: "🙏 भाई जी, हर हर महादेव! भोलेनाथ आपकी सारी मनोकामनाएं पूरी करें 🕉️"
-
-Comment: "Beautiful video ❤️"
-Reply: "बहुत शुक्रिया भाई! 🙏 आपका प्यार ही हमारी ताकत है ✨ ऐसे ही जुड़े रहिए"
-
-Comment: "Krishna ka favourite colour kya tha?"
-Reply: "बहुत अच्छा सवाल! 🙏 श्रीकृष्ण पीला रंग बहुत पसंद करते थे, इसलिए पीतांबर कहलाते हैं 🌸"
-
-═══════════════════════════════════════════
-
-अब reply लिखो — सिर्फ reply text, कुछ और नहीं:"""
+अब @{username} के लिए reply लिखो (सिर्फ reply, कुछ और नहीं):"""
 
     try:
         model = genai.GenerativeModel(GEMINI_MODEL)
@@ -193,38 +204,62 @@ Reply: "बहुत अच्छा सवाल! 🙏 श्रीकृष्
             prompt,
             generation_config={
                 "temperature": 0.8,
-                "max_output_tokens": 200,
+                "max_output_tokens": 150,
                 "top_p": 0.95,
             }
         )
 
-        raw = response.text.strip()
+        # Extract text safely
+        try:
+            raw = response.text.strip()
+        except Exception as e:
+            logger.warning(f"⚠️  Response.text failed: {e}")
+            return None
+
+        if not raw:
+            logger.warning("⚠️  Empty response from Gemini")
+            return None
 
         # Clean AI artifacts
         raw = raw.strip('"\'`')
         raw = re.sub(r'\*\*(.*?)\*\*', r'\1', raw)
         raw = re.sub(r'\*(.*?)\*', r'\1', raw)
+        raw = re.sub(r'```[\s\S]*?```', '', raw)  # Remove code blocks
 
-        # Remove "Reply:" prefix
-        if raw.lower().startswith("reply:"):
-            raw = raw.split(":", 1)[1].strip()
+        # Remove common prefixes
+        prefixes_to_remove = [
+            "reply:", "Reply:", "REPLY:",
+            "answer:", "Answer:",
+            "response:", "Response:",
+            "output:", "Output:",
+        ]
+        for prefix in prefixes_to_remove:
+            if raw.startswith(prefix):
+                raw = raw[len(prefix):].strip()
 
-        if len(raw) > 10 and len(raw) < 500:
-            return raw
+        # Take only first paragraph if multiple
+        if '\n\n' in raw:
+            raw = raw.split('\n\n')[0].strip()
+
+        # 🆕 V4: STRICT VALIDATION
+        is_valid, reason = _is_valid_reply(raw, text)
+        
+        if not is_valid:
+            logger.warning(f"⚠️  Reply rejected: {reason}")
+            logger.warning(f"   Rejected text: '{raw[:80]}...'")
+            return None
+
+        return raw
 
     except Exception as e:
         logger.warning(f"⚠️  Gemini reply failed: {e}")
-
-    return None
+        return None
 
 
 def _get_fallback_reply(intent: str, username: str) -> str:
     """Get template reply when AI fails"""
-    import random
-
     templates = REPLY_TEMPLATES.get(intent, REPLY_TEMPLATES["generic"])
     template = random.choice(templates)
-
     return template.format(name=username)
 
 
@@ -233,21 +268,7 @@ def _get_fallback_reply(intent: str, username: str) -> str:
 # ============================================================
 
 def generate_reply(comment: dict) -> str:
-    """
-    Generate contextual reply for a comment.
-
-    Args:
-        comment: {
-            "platform": "instagram/facebook/youtube",
-            "post_id": "...",
-            "comment_id": "...",
-            "text": "user comment text",
-            "username": "username"
-        }
-
-    Returns:
-        Reply text (Hindi) ready to post
-    """
+    """Generate contextual reply for a comment"""
     text = comment.get('text', '')
     username = comment.get('username', 'भक्त')
     platform = comment.get('platform', 'unknown')
@@ -255,35 +276,32 @@ def generate_reply(comment: dict) -> str:
     logger.info(f"💬 Generating reply for @{username} ({platform})")
     logger.info(f"   Comment: {text[:60]}...")
 
-    # Step 1: Detect intent
     intent = _detect_intent(text)
     logger.info(f"   Intent: {intent}")
 
-    # Step 2: Try AI reply
-    reply = _generate_ai_reply(comment, intent)
+    # Try AI (with retry)
+    reply = None
+    for attempt in range(2):  # 2 attempts
+        reply = _generate_ai_reply(comment, intent)
+        if reply:
+            break
+        if attempt == 0:
+            logger.info(f"   🔄 Retry Gemini...")
+            time.sleep(1)
 
     if reply:
         logger.info(f"   ✅ AI reply: {reply[:60]}...")
         return reply
 
-    # Step 3: Fallback to template
+    # Fallback to template
     logger.info(f"   ⚠️  Using template fallback")
     reply = _get_fallback_reply(intent, username)
-
     logger.info(f"   📝 Fallback reply: {reply[:60]}...")
     return reply
 
 
 def generate_replies_batch(comments: list) -> list:
-    """
-    Generate replies for multiple comments.
-
-    Args:
-        comments: List of comment dicts
-
-    Returns:
-        List of (comment, reply) tuples
-    """
+    """Generate replies for multiple comments"""
     logger.info(f"💬 Generating {len(comments)} replies...")
 
     results = []
@@ -296,12 +314,10 @@ def generate_replies_batch(comments: list) -> list:
             results.append((comment, reply))
         except Exception as e:
             logger.error(f"   ❌ Reply generation failed: {e}")
-            # Use fallback
             username = comment.get('username', 'भक्त')
             fallback = _get_fallback_reply("generic", username)
             results.append((comment, fallback))
 
-        # Rate limit: 1 second between Gemini calls
         if i < len(comments):
             time.sleep(1)
 
@@ -315,33 +331,36 @@ def generate_replies_batch(comments: list) -> list:
 
 if __name__ == "__main__":
     print("\n" + "=" * 60)
-    print("REPLY GENERATOR V3 - TEST")
+    print("REPLY GENERATOR V4 - VALIDATION TEST")
     print("=" * 60 + "\n")
 
+    # Test validation function
+    test_replies = [
+        ("Output ONLY the reply...", False),
+        ("🙏 भाई जी, हर हर महादेव!", True),
+        ("Reply: Beautiful post!", False),  # English + prefix
+        ("बहुत शुक्रिया! 🙏 ऐसे ही जुड़े रहिए ✨", True),
+        ("Sure! Here is your reply", False),
+        ("", False),
+        ("ok", False),
+    ]
+
+    print("🧪 Validation Test:")
+    for reply, expected in test_replies:
+        valid, reason = _is_valid_reply(reply, "")
+        status = "✅" if valid == expected else "❌"
+        print(f"   {status} '{reply[:40]}...' → valid={valid} ({reason})")
+
+    print("\n" + "=" * 60)
+    print("Real Gemini test:")
+    print("=" * 60)
+
     test_comments = [
-        {"platform": "instagram", "post_id": "1", "comment_id": "c1",
-         "text": "Har Har Mahadev 🙏", "username": "shiv_bhakt_123"},
-
-        {"platform": "facebook", "post_id": "2", "comment_id": "c2",
-         "text": "Beautiful video! Krishna bhagwan bahut sundar lagte hain ❤️",
-         "username": "Radha Sharma"},
-
-        {"platform": "youtube", "post_id": "3", "comment_id": "c3",
-         "text": "Bhagwan Shiva ka favourite number kya hai?",
-         "username": "Spiritual_Seeker"},
-
-        {"platform": "instagram", "post_id": "4", "comment_id": "c4",
-         "text": "Meri maa bahut bimar thi, maine Hanuman Chalisa padhi aur wo theek ho gayi 🙏",
-         "username": "ram_bhakt_99"},
+        {"platform": "instagram", "text": "jai ho prabhu", "username": "0o0_rahul"},
+        {"platform": "instagram", "text": "Har Har Mahadev 🙏", "username": "shiv_bhakt"},
     ]
 
     for comment in test_comments:
-        print(f"\n{'=' * 60}")
-        print(f"Platform: {comment['platform']}")
-        print(f"User: @{comment['username']}")
-        print(f"Comment: {comment['text']}")
-
+        print(f"\nComment: {comment['text']}")
         reply = generate_reply(comment)
-
-        print(f"\n💬 Reply:")
-        print(f"   {reply}")
+        print(f"Reply  : {reply}")
