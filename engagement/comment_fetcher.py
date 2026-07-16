@@ -1,9 +1,11 @@
 """
-Comment Fetcher V4 - Fixed Double Reply Bug
-- Persistent comment tracking with proper DB handling
-- Timestamp-based filtering (only last 24h comments)  
-- Single DB connection per operation
-- Proper reply_posted flag checking
+Comment Fetcher V5 - Fixed Filter Bug + Debug Logs
+
+FIXES:
+- _is_worth_replying() ab deity names, praise, romanized Hindi accept karta hai
+- Filter logs added - dikhega kya reject ho raha hai
+- Timezone-aware timestamp handling
+- Atomic DB operations
 """
 import time
 import re
@@ -30,12 +32,49 @@ META_BASE_URL = f"https://graph.facebook.com/{META_API_VERSION}"
 MAX_POSTS_TO_CHECK = 5
 MAX_COMMENTS_PER_POST = 20
 REQUEST_TIMEOUT = 15
+
 SPAM_KEYWORDS = [
     "follow me", "check my", "visit my", "dm me",
     "click link", "free money", "earn money",
     "whatsapp", "telegram group", "join now",
     "s3x", "adult", "dating"
 ]
+
+# 🆕 V5: Deity/religious keywords (romanized Hindi + English)
+DEITY_KEYWORDS = [
+    # Jai/Jay variations
+    'jai', 'jay', 'jaii', 'jayy',
+    # Shree/Shri
+    'shree', 'shri', 'sree', 'sri',
+    # Krishna
+    'krishna', 'krisna', 'krsna', 'kanha', 'kanhaiya', 'kanhaiyya',
+    'govind', 'govinda', 'gopal', 'gopala', 'madhav', 'madhava',
+    # Radha
+    'radhe', 'radha', 'radharani',
+    # Ram
+    'ram', 'rama', 'raam', 'sitaram', 'jaisiyaram',
+    # Shiva
+    'shiva', 'shiv', 'mahadev', 'mahakal', 'bholenath', 'shankar',
+    'har har', 'harhar', 'bhole', 'baba',
+    # Hanuman
+    'hanuman', 'bajrangbali', 'bajrang', 'pawanputra',
+    # Ganesha
+    'ganesh', 'ganesha', 'ganpati', 'ganapati', 'vinayak',
+    # Durga/Devi
+    'durga', 'devi', 'mata', 'maiya', 'ambe', 'kali', 'sherawali',
+    # Vishnu
+    'vishnu', 'narayan', 'narayana', 'hari',
+    # General religious
+    'om', 'aum', 'namah', 'shivay', 'shivaya',
+    'namaste', 'pranam', 'bhagwan', 'prabhu', 'ishwar', 'god', 'lord',
+    'bhakti', 'bhakt', 'mandir', 'temple', 'darshan',
+    # Praise words
+    'amazing', 'beautiful', 'wonderful', 'awesome', 'excellent',
+    'love', 'lovely', 'nice', 'good', 'great', 'super', 'best',
+    'thanks', 'thank', 'thankyou', 'thx',
+    'wow', 'omg', 'incredible',
+]
+
 
 # ============================================================
 # DATABASE - SINGLE CONNECTION MANAGER
@@ -44,8 +83,8 @@ SPAM_KEYWORDS = [
 def _get_db():
     """Get DB connection with WAL mode for reliability"""
     conn = get_connection()
-    conn.execute("PRAGMA journal_mode=WAL")   # Better concurrent access
-    conn.execute("PRAGMA synchronous=NORMAL") # Balance speed/safety
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
     return conn
 
 
@@ -68,7 +107,6 @@ def _ensure_comment_table():
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        # Index for fast lookups
         cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_comment_id 
             ON comment_replies(comment_id)
@@ -78,11 +116,11 @@ def _ensure_comment_table():
         logger.debug("✅ Comment table ready")
     except Exception as e:
         logger.error(f"❌ Comment table setup failed: {e}")
-        raise  # Yeh critical hai, fail hona chahiye
+        raise
 
 
 # ============================================================
-# CORE FIX: ATOMIC CHECK + INSERT
+# ATOMIC CHECK + INSERT
 # ============================================================
 
 def _check_and_save_comment(
@@ -93,24 +131,16 @@ def _check_and_save_comment(
     commenter_name: str
 ) -> bool:
     """
-    ATOMIC operation: Check if new + Save if new.
-    
-    Single transaction mein check aur save karo - 
-    race condition bilkul nahi hoga.
-    
-    Returns:
-        True  = Comment naya hai, process karo
-        False = Already seen/replied, skip karo
+    ATOMIC: Check if new + Save if new.
+    Returns True = new comment, False = already processed
     """
     try:
         conn = _get_db()
         cursor = conn.cursor()
         
         try:
-            # BEGIN EXCLUSIVE TRANSACTION - koi race condition nahi
             cursor.execute("BEGIN EXCLUSIVE")
             
-            # Check karo already exists?
             cursor.execute(
                 "SELECT id, reply_posted FROM comment_replies WHERE comment_id = ?",
                 (comment_id,)
@@ -118,41 +148,35 @@ def _check_and_save_comment(
             existing = cursor.fetchone()
             
             if existing is not None:
-                # Already in DB = already processed
                 row_id, reply_posted = existing
-                logger.debug(
-                    f"   ⏭️  Skip [{comment_id[:12]}...] "
-                    f"reply_posted={reply_posted}"
+                logger.info(
+                    f"      ⏭️  DB Skip [{comment_id[:12]}...] "
+                    f"already_processed=True reply_posted={reply_posted}"
                 )
                 conn.execute("ROLLBACK")
                 conn.close()
                 return False
             
-            # Naya hai - INSERT karo
             cursor.execute("""
                 INSERT INTO comment_replies
                     (platform, post_id, comment_id, comment_text, 
                      commenter_name, reply_posted, created_at)
                 VALUES (?, ?, ?, ?, ?, 0, ?)
             """, (
-                platform,
-                post_id, 
-                comment_id,
-                comment_text,
-                commenter_name,
-                datetime.now(timezone.utc).isoformat()
+                platform, post_id, comment_id, comment_text,
+                commenter_name, datetime.now(timezone.utc).isoformat()
             ))
             
             conn.execute("COMMIT")
             conn.close()
-            logger.debug(f"   💾 Saved new comment [{comment_id[:12]}...]")
+            logger.info(f"      💾 SAVED new comment [{comment_id[:12]}...]")
             return True
             
         except Exception as e:
             conn.execute("ROLLBACK")
             conn.close()
             logger.error(f"❌ Transaction failed for {comment_id}: {e}")
-            return False  # Safe side pe skip karo
+            return False
             
     except Exception as e:
         logger.error(f"❌ DB connection failed: {e}")
@@ -160,17 +184,14 @@ def _check_and_save_comment(
 
 
 def mark_reply_posted(comment_id: str, reply_text: str):
-    """
-    Reply post hone ke BAAD call karo.
-    Yeh function reply_poster.py mein call hona chahiye.
-    """
+    """Reply post hone ke BAAD call karo."""
     try:
         conn = _get_db()
         cursor = conn.cursor()
         cursor.execute("""
             UPDATE comment_replies 
-            SET reply_posted = 1,
-                reply_text = ?,
+            SET reply_text = ?,
+                reply_posted = 1,
                 replied_at = ?
             WHERE comment_id = ?
         """, (
@@ -201,13 +222,10 @@ def _is_spam(comment_text: str) -> bool:
 
     text_lower = comment_text.lower().strip()
 
-    # Spam keywords check
     for keyword in SPAM_KEYWORDS:
         if keyword in text_lower:
-            logger.debug(f"   🚫 Spam keyword '{keyword}' found")
             return True
 
-    # Multiple URLs
     if text_lower.count("http") > 1:
         return True
 
@@ -219,38 +237,61 @@ def _is_spam(comment_text: str) -> bool:
     return False
 
 
+# ============================================================
+# 🆕 V5: LIBERAL WORTH REPLYING CHECK
+# ============================================================
+
 def _is_worth_replying(comment_text: str) -> bool:
     """
-    Check if comment deserves a reply.
+    V5: Much more liberal — accepts:
+    - Deity names (jai shree krishna, har har mahadev)
+    - Praise words (amazing, nice, wow)
+    - Any Hindi text (2+ devanagari chars)
+    - Questions
+    - Multiple words
+    - Long meaningful text
     
-    Skip: Empty, single emoji, single word
-    Reply: Questions, 2+ words, Hindi text, mentions
+    Skips ONLY:
+    - Pure emojis
+    - Empty/whitespace
+    - Random gibberish single word
     """
     if not comment_text or not comment_text.strip():
         return False
 
-    # Emojis hata ke clean text dekho
+    # Emojis + special chars hata ke clean text
     clean = re.sub(
-        r'[\U0001F300-\U0001FFFF\U00002600-\U000027BF]',
+        r'[\U0001F300-\U0001FFFF\U00002600-\U000027BF\U0001F600-\U0001F9FF]',
         '', comment_text
     ).strip()
 
-    # Pure emoji comment - skip
+    # Pure emoji comment
     if len(clean) < 2:
         return False
 
-    # Question = always reply
-    if '?' in comment_text:
+    text_lower = clean.lower()
+
+    # ✅ Question = always reply
+    if '?' in comment_text or '?' in comment_text:
         return True
 
-    # Hindi/Devanagari text = engaged user
+    # ✅ Devanagari (Hindi/Sanskrit) text
     devanagari_count = sum(1 for c in comment_text if '\u0900' <= c <= '\u097F')
-    if devanagari_count > 3:
+    if devanagari_count >= 2:  # Just 2 chars enough (जय, ॐ, राम)
         return True
 
-    # 2+ words = engaged
+    # ✅ Deity keywords / religious phrases
+    for keyword in DEITY_KEYWORDS:
+        if keyword in text_lower:
+            return True
+
+    # ✅ Multiple words
     words = clean.split()
     if len(words) >= 2:
+        return True
+
+    # ✅ Long single word (10+ chars) = probably meaningful
+    if len(clean) >= 10:
         return True
 
     return False
@@ -261,7 +302,6 @@ def _parse_timestamp(ts_string: str) -> Optional[datetime]:
     if not ts_string:
         return None
     try:
-        # Handle both formats
         ts_string = ts_string.replace('Z', '+00:00')
         return datetime.fromisoformat(ts_string)
     except Exception:
@@ -269,18 +309,14 @@ def _parse_timestamp(ts_string: str) -> Optional[datetime]:
 
 
 def _is_recent(timestamp_str: str, hours: int = 48) -> bool:
-    """
-    Check if comment is from last N hours.
-    48 hours window use karo (24h too tight for some timezones)
-    """
+    """Check if comment is from last N hours."""
     if not timestamp_str:
-        return True  # Agar timestamp nahi hai to process karo
+        return True
 
     comment_time = _parse_timestamp(timestamp_str)
     if not comment_time:
         return True
 
-    # Timezone aware comparison
     now = datetime.now(timezone.utc)
     if comment_time.tzinfo is None:
         comment_time = comment_time.replace(tzinfo=timezone.utc)
@@ -359,13 +395,12 @@ def fetch_ig_new_comments() -> list:
         post_id = post.get('id', '')
         post_time = post.get('timestamp', '')
         
-        # 72 hour old posts ke comments skip karo
         if post_time and not _is_recent(post_time, hours=72):
             logger.debug(f"   ⏭️  Old post skip: {post_id}")
             continue
         
         comments = _get_ig_comments(post_id)
-        logger.debug(f"   Post {post_id}: {len(comments)} comments fetched")
+        logger.info(f"   📄 Post {post_id[:15]}...: {len(comments)} comments found")
 
         for comment in comments:
             comment_id = comment.get('id', '')
@@ -373,31 +408,34 @@ def fetch_ig_new_comments() -> list:
             username = comment.get('username', '')
             timestamp = comment.get('timestamp', '')
 
+            # 🔍 DIAGNOSTIC LOG - Har comment dikhao
+            logger.info(f"   🔍 IG Check: @{username} | '{text[:60]}'")
+
             if not comment_id:
+                logger.info(f"      ⏭️  Skip: no comment_id")
                 continue
 
-            # Recent comments hi process karo (48h)
             if not _is_recent(timestamp, hours=48):
+                logger.info(f"      ⏭️  Skip: too old ({timestamp})")
                 continue
 
-            # Spam check
             if _is_spam(text):
-                logger.debug(f"   🚫 Spam: {text[:30]}")
+                logger.info(f"      🚫 Skip: SPAM detected")
                 continue
 
-            # Worth replying check
             if not _is_worth_replying(text):
-                logger.debug(f"   ⏭️  Not worth: {text[:30]}")
+                logger.info(f"      ⏭️  Skip: not worth replying (filter check)")
                 continue
 
-            # ATOMIC: Check + Save ek saath
-            # Yahi main fix hai - agar already hai to False return hoga
+            # ATOMIC check + save
             is_new = _check_and_save_comment(
                 "instagram", post_id, comment_id, text, username
             )
             
             if not is_new:
-                continue  # Already processed
+                continue  # DB skip log already printed inside function
+
+            logger.info(f"      ✅ QUEUED for reply!")
 
             new_comments.append({
                 "platform": "instagram",
@@ -408,9 +446,9 @@ def fetch_ig_new_comments() -> list:
                 "timestamp": timestamp
             })
 
-        time.sleep(0.5)  # Rate limit
+        time.sleep(0.5)
 
-    logger.info(f"📸 IG: {len(new_comments)} new comments")
+    logger.info(f"📸 IG: {len(new_comments)} new comments queued")
     return new_comments
 
 
@@ -486,7 +524,7 @@ def fetch_fb_new_comments() -> list:
             continue
 
         comments = _get_fb_comments(post_id)
-        logger.debug(f"   Post {post_id}: {len(comments)} comments fetched")
+        logger.info(f"   📄 Post {post_id[:15]}...: {len(comments)} comments found")
 
         for comment in comments:
             comment_id = comment.get('id', '')
@@ -495,25 +533,33 @@ def fetch_fb_new_comments() -> list:
             username = from_data.get('name', 'Unknown')
             timestamp = comment.get('created_time', '')
 
+            # 🔍 DIAGNOSTIC LOG
+            logger.info(f"   🔍 FB Check: {username} | '{text[:60]}'")
+
             if not comment_id:
+                logger.info(f"      ⏭️  Skip: no comment_id")
                 continue
 
             if not _is_recent(timestamp, hours=48):
+                logger.info(f"      ⏭️  Skip: too old")
                 continue
 
             if _is_spam(text):
+                logger.info(f"      🚫 Skip: SPAM")
                 continue
 
             if not _is_worth_replying(text):
+                logger.info(f"      ⏭️  Skip: not worth replying")
                 continue
 
-            # ATOMIC check + save
             is_new = _check_and_save_comment(
                 "facebook", post_id, comment_id, text, username
             )
             
             if not is_new:
                 continue
+
+            logger.info(f"      ✅ QUEUED for reply!")
 
             new_comments.append({
                 "platform": "facebook",
@@ -526,7 +572,7 @@ def fetch_fb_new_comments() -> list:
 
         time.sleep(0.5)
 
-    logger.info(f"📘 FB: {len(new_comments)} new comments")
+    logger.info(f"📘 FB: {len(new_comments)} new comments queued")
     return new_comments
 
 
@@ -576,29 +622,38 @@ def fetch_yt_new_comments() -> list:
                     order="time"
                 ).execute()
 
-                for item in comment_response.get('items', []):
+                items = comment_response.get('items', [])
+                logger.info(f"   📄 Video {video_id[:15]}...: {len(items)} comments found")
+
+                for item in items:
                     snippet = item['snippet']['topLevelComment']['snippet']
                     comment_id = item['id']
                     text = snippet.get('textDisplay', '')
                     username = snippet.get('authorDisplayName', 'Unknown')
                     timestamp = snippet.get('publishedAt', '')
 
+                    logger.info(f"   🔍 YT Check: {username} | '{text[:60]}'")
+
                     if not _is_recent(timestamp, hours=48):
+                        logger.info(f"      ⏭️  Skip: too old")
                         continue
 
                     if _is_spam(text):
+                        logger.info(f"      🚫 Skip: SPAM")
                         continue
 
                     if not _is_worth_replying(text):
+                        logger.info(f"      ⏭️  Skip: not worth replying")
                         continue
 
-                    # ATOMIC check + save
                     is_new = _check_and_save_comment(
                         "youtube", video_id, comment_id, text, username
                     )
                     
                     if not is_new:
                         continue
+
+                    logger.info(f"      ✅ QUEUED for reply!")
 
                     new_comments.append({
                         "platform": "youtube",
@@ -615,7 +670,7 @@ def fetch_yt_new_comments() -> list:
                 logger.warning(f"⚠️  YT video {video_id} failed: {e}")
                 continue
 
-        logger.info(f"📺 YT: {len(new_comments)} new comments")
+        logger.info(f"📺 YT: {len(new_comments)} new comments queued")
         return new_comments
 
     except ImportError:
@@ -633,10 +688,9 @@ def fetch_yt_new_comments() -> list:
 def fetch_all_new_comments(max_total: int = 20) -> list:
     """Fetch new comments from ALL platforms"""
     logger.info("=" * 55)
-    logger.info("=== COMMENT FETCHER START ===")
+    logger.info("=== COMMENT FETCHER V5 START ===")
     logger.info("=" * 55)
 
-    # Ek baar table ensure karo - sab fetch functions se pehle
     _ensure_comment_table()
 
     all_comments = []
@@ -659,7 +713,6 @@ def fetch_all_new_comments(max_total: int = 20) -> list:
     except Exception as e:
         logger.error(f"❌ YT fetch failed: {e}")
 
-    # Limit
     if len(all_comments) > max_total:
         logger.info(f"📊 Limiting: {len(all_comments)} → {max_total}")
         all_comments = all_comments[:max_total]
@@ -674,23 +727,42 @@ def fetch_all_new_comments(max_total: int = 20) -> list:
     return all_comments
 
 
-# ============================================================
-# REPLY POSTER KE LIYE - IMPORT KARKE USE KARO
-# ============================================================
-
 __all__ = [
     'fetch_all_new_comments',
     'fetch_ig_new_comments', 
     'fetch_fb_new_comments',
     'fetch_yt_new_comments',
-    'mark_reply_posted',        # ← Reply poster mein call karo
+    'mark_reply_posted',
     '_ensure_comment_table',
 ]
 
 
 if __name__ == "__main__":
     print("\n" + "=" * 60)
-    print("COMMENT FETCHER V4 - TEST")
+    print("COMMENT FETCHER V5 - TEST")
+    print("=" * 60 + "\n")
+
+    # Test the filter
+    test_cases = [
+        ("jai shree krishna ❤️", True),
+        ("जय श्री कृष्ण", True),
+        ("nice", True),  # praise
+        ("❤️❤️❤️", False),  # pure emoji
+        ("wow amazing post", True),
+        ("har har mahadev", True),
+        ("ok", False),  # too short + not praise
+        ("hi", False),  # too short
+        ("bajrangbali ki jai", True),
+    ]
+
+    print("🧪 Filter Test:")
+    for text, expected in test_cases:
+        result = _is_worth_replying(text)
+        status = "✅" if result == expected else "❌"
+        print(f"   {status} '{text}' → {result} (expected {expected})")
+
+    print("\n" + "=" * 60)
+    print("Fetching real comments...")
     print("=" * 60 + "\n")
 
     comments = fetch_all_new_comments(max_total=10)
@@ -700,4 +772,3 @@ if __name__ == "__main__":
         print(f"\n  [{i}] {comment['platform'].upper()}")
         print(f"      User: @{comment['username']}")
         print(f"      Text: {comment['text'][:80]}")
-        print(f"      Time: {comment['timestamp']}")
