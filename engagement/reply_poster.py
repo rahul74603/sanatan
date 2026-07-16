@@ -23,7 +23,7 @@ from utils.logger import get_logger
 
 # ✅ FIX 1: Comment fetcher ka mark function import karo
 # Ek hi jagah se DB update hoga - no duplication
-from fetchers.comment_fetcher import mark_reply_posted
+from engagement.comment_fetcher import mark_reply_posted
 
 logger = get_logger("reply_poster")
 
