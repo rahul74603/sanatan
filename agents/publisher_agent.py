@@ -331,9 +331,23 @@ def post_to_facebook(image_url: str, caption: str) -> dict:
 # CAPTION PREPARATION
 # ============================================================
 
-def _prepare_caption(caption: str, hashtags: str) -> str:
-    separator    = "\n\n.\n.\n.\n\n"
-    full_caption = f"{caption}{separator}{hashtags}"
+def _prepare_caption(caption: str, hashtags: str, post_type: str = "image") -> str:
+    """V4: SEO-optimized caption with proper spacing"""
+
+    # V4: Add follow CTA before hashtags
+    follow_cta = "\n\n📿 Follow @sanatanii_soch for daily भक्ति content\n🔔 Like + Comment + Share = भगवान की कृपा 🙏"
+
+    separator = "\n\n.\n.\n.\n\n"
+    full_caption = f"{caption}{follow_cta}{separator}{hashtags}"
+
+    if len(full_caption) > MAX_CAPTION_LENGTH:
+        available = MAX_CAPTION_LENGTH - len(hashtags) - len(separator) - len(follow_cta) - 3
+        if available > 100:
+            full_caption = f"{caption[:available]}...{follow_cta}{separator}{hashtags}"
+        else:
+            full_caption = full_caption[:MAX_CAPTION_LENGTH - 3] + "..."
+        logger.warning(f"⚠️  Caption छोटा किया गया: {len(full_caption)} chars")
+    return full_caption
     if len(full_caption) > MAX_CAPTION_LENGTH:
         available = MAX_CAPTION_LENGTH - len(hashtags) - len(separator) - 3
         if available > 100:
@@ -1048,6 +1062,11 @@ def _prepare_fb_reel_description(caption: str, memory: Optional[AgentMemory] = N
     parts.append("🔄 अपने दोस्तों को Share करें")
     parts.append("📸 Instagram: @sanatanii_soch")
     parts.append("🔔 Page Follow करें: सनातन सोच")
+    parts.append("")
+    parts.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    parts.append("🔍 Keywords: सनातन धर्म, हिंदू धर्म, भक्ति, आध्यात्मिक, "
+                 "Sanatan Dharma, Hindu, Spiritual, Devotional, "
+                 "Indian Mythology, Daily Wisdom, भगवान, प्रेरणा")
 
     return "\n".join(parts)
 

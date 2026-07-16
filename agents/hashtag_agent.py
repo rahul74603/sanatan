@@ -524,14 +524,23 @@ def run(memory: AgentMemory) -> AgentMemory:
         all_hashtags.extend(keyword_tags[:3])
         breakdown["Keywords"] = len(keyword_tags[:3])
 
-    # ═══════════════════════════════════════════════
-    # 🆕 V2: REEL-SPECIFIC HASHTAGS
+        # ═══════════════════════════════════════════════
+    # 🆕 V4: PLATFORM-SPECIFIC SEO HASHTAGS
     # ═══════════════════════════════════════════════
     if post_type == "reel":
         reel_tags = _get_reel_hashtags(OPTIMAL_MIX["reel_specific"])
         all_hashtags.extend(reel_tags)
         breakdown["Reel-Specific"] = len(reel_tags)
         logger.info(f"🎬 Reel hashtags added: {len(reel_tags)}")
+
+    # V4: SEO boost hashtags (always add for all post types)
+    seo_tags = [
+        "#sanatanisoch", "#sanataniisoch",     # Brand
+        "#bhakti", "#sanatan", "#hindu",         # Core
+        "#dailypost", "#viralpost",              # Reach
+    ]
+    all_hashtags.extend(seo_tags)
+    breakdown["SEO-Brand"] = len(seo_tags)
 
     # ═══════════════════════════════════════════════
     # CLEANUP + VALIDATION

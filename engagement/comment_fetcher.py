@@ -70,19 +70,26 @@ def _ensure_comment_table():
 
 
 def _is_already_replied(comment_id: str) -> bool:
-    """Check if we already replied to this comment"""
+    """Check if we already replied OR even FETCHED this comment before"""
     try:
         conn = get_connection()
         cursor = conn.cursor()
+        # V4 FIX: Check if comment EXISTS in table at all (fetched = already processed)
         cursor.execute(
-            "SELECT id FROM comment_replies WHERE comment_id = ? LIMIT 1",
+            "SELECT id, reply_posted FROM comment_replies WHERE comment_id = ? LIMIT 1",
             (comment_id,)
         )
         result = cursor.fetchone()
         conn.close()
-        return result is not None
-    except Exception:
+
+        if result is not None:
+            logger.debug(f"   ⏭️  Already processed: {comment_id[:15]}... (posted: {result[1]})")
+            return True
+
         return False
+    except Exception as e:
+        logger.warning(f"   ⚠️  Reply check failed: {e}")
+        return False  # If DB fails, allow (better than missing)
 
 
 def _save_comment(platform: str, post_id: str, comment_id: str,

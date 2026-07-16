@@ -664,49 +664,43 @@ def _run_stage_video_watermark(memory: AgentMemory) -> AgentMemory:
 
 def _run_stage_thumbnail(memory: AgentMemory) -> AgentMemory:
     """
-    🆕 V3: Generate thumbnail from Scene 1 image.
+    🆕 V4: Generate VIRAL-style thumbnail with BOLD hook text.
 
-    Why:
-    - IG/FB/YT use first video frame as thumbnail
-    - Our videos start with fade-in = BLACK frame
-    - Black thumbnail = nobody clicks
-    - Solution: Use Scene 1 image as cover/thumbnail
-
-    For YouTube: Upload custom thumbnail via API
-    For IG/FB: First frame of video = thumbnail (already fixed by removing fade-in)
+    Creates eye-catching cover image:
+    - Scene 1 as background (darkened)
+    - BIG BOLD Hindi hook text (top)
+    - Gradient overlay (readable text)
+    - Brand name (bottom)
+    - Emoji for attention
     """
     start = time.time()
     logger.info("")
     logger.info(f"━━━ 🖼️  Thumbnail Generate करना ━━━")
 
     try:
-        # Get Scene 1 image (best for thumbnail)
         if not memory.reel_scenes:
             logger.warning("⚠️  No scenes, skipping thumbnail")
             return memory
 
-        scene_1 = memory.reel_scenes[0]
-        scene_1_bytes = scene_1.get("image_bytes")
-
-        if not scene_1_bytes:
-            # Try scene 2 or 3
-            for scene in memory.reel_scenes[1:]:
-                if scene.get("image_bytes"):
-                    scene_1_bytes = scene["image_bytes"]
-                    break
+        # Get best scene image for thumbnail
+        scene_1_bytes = None
+        for scene in memory.reel_scenes:
+            if scene.get("image_bytes"):
+                scene_1_bytes = scene["image_bytes"]
+                break
 
         if not scene_1_bytes:
             logger.warning("⚠️  No scene images for thumbnail")
             return memory
 
-        # Create thumbnail with text overlay
-        from PIL import Image, ImageDraw, ImageFont
+        from PIL import Image, ImageDraw, ImageFont, ImageEnhance
         from io import BytesIO
+        import textwrap
 
         # Load scene image
         img = Image.open(BytesIO(scene_1_bytes))
 
-        # Ensure RGB
+        # Convert to RGB
         if img.mode != 'RGB':
             if img.mode == 'RGBA':
                 bg = Image.new('RGB', img.size, (0, 0, 0))
@@ -715,13 +709,36 @@ def _run_stage_thumbnail(memory: AgentMemory) -> AgentMemory:
             else:
                 img = img.convert('RGB')
 
-        # Resize to exact 1080x1920 (9:16)
+        # Resize to 1080x1920
         img = img.resize((1080, 1920), Image.LANCZOS)
 
-        # Add hook text overlay (top area)
-        draw = ImageDraw.Draw(img)
+        # V4: DARKEN image slightly (text readable banega)
+        enhancer = ImageEnhance.Brightness(img)
+        img = enhancer.enhance(0.7)  # 70% brightness
 
-        # Load Hindi font
+        # Convert to RGBA for overlays
+        img = img.convert("RGBA")
+        overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(overlay)
+
+        # ═══════════════════════════════════════════
+        # TOP GRADIENT (dark → transparent) for text readability
+        # ═══════════════════════════════════════════
+        for i in range(500):
+            alpha = int(200 * (1 - i / 500))
+            draw.rectangle([(0, i), (1080, i + 1)], fill=(0, 0, 0, alpha))
+
+        # ═══════════════════════════════════════════
+        # BOTTOM GRADIENT (transparent → dark) for brand
+        # ═══════════════════════════════════════════
+        for i in range(300):
+            alpha = int(180 * (i / 300))
+            y = 1920 - 300 + i
+            draw.rectangle([(0, y), (1080, y + 1)], fill=(0, 0, 0, alpha))
+
+        # ═══════════════════════════════════════════
+        # LOAD HINDI FONT
+        # ═══════════════════════════════════════════
         font_path = None
         font_paths = [
             "fonts/NotoSansDevanagari-Bold.ttf",
@@ -734,64 +751,124 @@ def _run_stage_thumbnail(memory: AgentMemory) -> AgentMemory:
                 break
 
         if font_path:
-            try:
-                font_large = ImageFont.truetype(font_path, 72)
-                font_small = ImageFont.truetype(font_path, 36)
-            except Exception:
-                font_large = ImageFont.load_default()
-                font_small = ImageFont.load_default()
+            font_huge = ImageFont.truetype(font_path, 85)   # HOOK text
+            font_medium = ImageFont.truetype(font_path, 50)  # Sub text
+            font_brand = ImageFont.truetype(font_path, 38)   # Brand
         else:
-            font_large = ImageFont.load_default()
-            font_small = ImageFont.load_default()
+            font_huge = ImageFont.load_default()
+            font_medium = ImageFont.load_default()
+            font_brand = ImageFont.load_default()
 
-        # Get hook text from scene 1 narration
+        # ═══════════════════════════════════════════
+        # GET HOOK TEXT from Scene 1
+        # ═══════════════════════════════════════════
+        scene_1 = memory.reel_scenes[0]
         hook_text = scene_1.get("narration", memory.topic)
 
-        # Truncate to first sentence or 30 chars
-        if '।' in hook_text:
-            hook_text = hook_text.split('।')[0] + '?'
+        # Extract first impactful sentence
+        if 'क्या आप जानते' in hook_text:
+            hook_text = "क्या आप\nजानते हैं? 🤯"
         elif '?' in hook_text:
-            hook_text = hook_text.split('?')[0] + '?'
-        elif len(hook_text) > 40:
-            hook_text = hook_text[:40] + '...'
+            parts = hook_text.split('?')
+            hook_text = parts[0].strip()[:30] + "?"
+        elif '।' in hook_text:
+            parts = hook_text.split('।')
+            hook_text = parts[0].strip()[:30]
+        elif len(hook_text) > 25:
+            # Wrap at ~12 chars per line
+            words = hook_text.split()[:5]
+            hook_text = ' '.join(words)
+        
+        # Add emoji based on category
+        category_emoji = {
+            "krishna": "🦚",
+            "shiva": "🕉️",
+            "hanuman": "🚩",
+            "ganesha": "🐘",
+            "durga": "🌺",
+            "ram": "🏹",
+            "motivational": "💪",
+            "temple": "🛕",
+        }
+        emoji = category_emoji.get(memory.category, "🙏")
 
-        # Draw semi-transparent gradient at top
-        gradient_height = 400
-        for i in range(gradient_height):
-            alpha = int(180 * (1 - i / gradient_height))
-            y = i
-            draw.rectangle(
-                [(0, y), (1080, y + 1)],
-                fill=(0, 0, 0, alpha) if img.mode == 'RGBA' else (0, 0, 0)
-            )
+        # ═══════════════════════════════════════════
+        # DRAW HOOK TEXT (TOP - BIG BOLD)
+        # ═══════════════════════════════════════════
+        wrapped = textwrap.fill(hook_text, width=12)
+        lines = wrapped.split('\n')[:3]
 
-        # Draw text at top
-        # Wrap text manually
-        import textwrap
-        wrapped = textwrap.fill(hook_text, width=15)
-        lines = wrapped.split('\n')[:3]  # Max 3 lines
-
-        y_pos = 80
+        y_pos = 100
         for line in lines:
-            # Shadow
-            draw.text((42, y_pos + 2), line, font=font_large, fill=(0, 0, 0))
-            # Main text (gold)
-            draw.text((40, y_pos), line, font=font_large, fill=(255, 215, 0))
-            y_pos += 85
+            # Shadow (black outline for readability)
+            for dx in [-3, -2, 0, 2, 3]:
+                for dy in [-3, -2, 0, 2, 3]:
+                    draw.text((60 + dx, y_pos + dy), line, font=font_huge, fill=(0, 0, 0, 220))
+            
+            # Main text — BRIGHT GOLD
+            draw.text((60, y_pos), line, font=font_huge, fill=(255, 215, 0, 255))
+            y_pos += 100
 
-        # Draw brand name at bottom
+        # ═══════════════════════════════════════════
+        # EMOJI (Big, next to text)
+        # ═══════════════════════════════════════════
+        draw.text((900, 120), emoji, font=font_huge, fill=(255, 255, 255, 255))
+
+        # ═══════════════════════════════════════════
+        # CATEGORY TAG (Below hook text)
+        # ═══════════════════════════════════════════
+        category_hindi = {
+            "krishna": "श्री कृष्ण",
+            "shiva": "महादेव",
+            "hanuman": "हनुमान जी",
+            "ganesha": "गणेश जी",
+            "durga": "मां दुर्गा",
+            "ram": "श्री राम",
+            "motivational": "प्रेरणा",
+            "temple": "मंदिर",
+        }
+        cat_text = category_hindi.get(memory.category, "भक्ति")
+
+        # Pill background for category tag
+        tag_y = y_pos + 30
+        tag_text = f" {emoji} {cat_text} "
+        try:
+            bbox = font_medium.getbbox(tag_text)
+            tag_w = bbox[2] - bbox[0] + 40
+            tag_h = bbox[3] - bbox[1] + 20
+        except Exception:
+            tag_w = 300
+            tag_h = 60
+
+        # Draw rounded pill
+        draw.rounded_rectangle(
+            [(50, tag_y), (50 + tag_w, tag_y + tag_h)],
+            radius=30,
+            fill=(255, 100, 0, 200)  # Orange pill
+        )
+        draw.text((70, tag_y + 5), tag_text, font=font_medium, fill=(255, 255, 255, 255))
+
+        # ═══════════════════════════════════════════
+        # BRAND NAME (Bottom)
+        # ═══════════════════════════════════════════
         brand_text = "@sanatanii_soch"
-        draw.text((40, 1820), brand_text, font=font_small, fill=(255, 255, 255))
+        draw.text((60, 1840), brand_text, font=font_brand, fill=(255, 215, 0, 220))
+
+        # Small "▶️ Watch Now" text
+        draw.text((60, 1780), "▶ देखिए पूरी कहानी", font=font_brand, fill=(255, 255, 255, 180))
+
+        # ═══════════════════════════════════════════
+        # COMPOSE FINAL
+        # ═══════════════════════════════════════════
+        final = Image.alpha_composite(img, overlay)
+        final = final.convert("RGB")
 
         # Save thumbnail
         thumb_buf = BytesIO()
-        img.save(thumb_buf, format='JPEG', quality=90)
+        final.save(thumb_buf, format='JPEG', quality=92)
         thumb_bytes = thumb_buf.getvalue()
 
-        # Save to memory
-        memory.reel_thumbnail_url = ""  # Will be set after upload
-
-        # Save thumbnail file locally
+        # Save locally
         thumb_dir = Path("logs/thumbnails")
         thumb_dir.mkdir(parents=True, exist_ok=True)
         thumb_path = thumb_dir / f"thumb_{memory.session_id}.jpg"
@@ -801,9 +878,10 @@ def _run_stage_thumbnail(memory: AgentMemory) -> AgentMemory:
 
         logger.info(f"✅ Thumbnail generated: {len(thumb_bytes):,} bytes")
         logger.info(f"   📁 Path: {thumb_path}")
-        logger.info(f"   📝 Hook: {hook_text[:50]}")
+        logger.info(f"   📝 Hook: {hook_text[:40]}")
+        logger.info(f"   🏷️  Category: {cat_text}")
 
-        # Upload thumbnail to GCS
+        # Upload to GCS
         try:
             from utils.gcs_helper import upload_image
             thumb_url = upload_image(
@@ -817,7 +895,7 @@ def _run_stage_thumbnail(memory: AgentMemory) -> AgentMemory:
             logger.warning(f"   ⚠️  Thumbnail upload failed: {e}")
 
     except Exception as e:
-        logger.warning(f"⚠️  Thumbnail generation failed (non-critical): {e}")
+        logger.warning(f"⚠️  Thumbnail generation failed: {e}")
 
     elapsed = round(time.time() - start, 2)
     logger.info(f"✅ Thumbnail done ({elapsed}s)")

@@ -336,10 +336,40 @@ Deity references you can use:
     if weekday and weekday in ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]:
         weekday_context = f"\n📅 Aaj {weekday} hai."
 
-    # 🆕 Reel context (if applicable)
+        # 🆕 V4: Platform-specific SEO context
     reel_context = ""
     if memory.post_type == "reel":
-        reel_context = f"\n\n🎬 REEL CAPTION: Video ke saath dikhega. Hook aur CTA important hai."
+        reel_context = """
+
+🎬 REEL CAPTION RULES:
+- First line = HOOK (viewer ruke)
+- "क्या आपको पता है..." ya "ये बात 99% लोग नहीं जानते..."
+- Body = 2-3 emotional lines about video content
+- End = STRONG CTA:
+  "❤️ अगर आप भी [deity] भक्त हैं तो Like करो"
+  "💬 Comment में 🙏 लिखो"
+  "🔄 अपनी माँ को भेजो ये video"
+  "💾 बाद में देखने के लिए Save करो"
+- Last line: "Follow @sanatanii_soch 🙏"
+"""
+    elif memory.post_type == "carousel":
+        reel_context = """
+
+🎠 CAROUSEL CAPTION RULES:
+- First line = curiosity hook
+- "Swipe करो 👉 पूरी कहानी देखो"
+- Body = carousel ka summary
+- CTA = "Save करो बाद में पढ़ने के लिए 💾"
+"""
+    else:
+        reel_context = """
+
+📸 IMAGE CAPTION RULES:
+- First line = powerful statement about image
+- Body = 2-3 lines emotional/devotional
+- CTA = "❤️ Double tap अगर agree करते हो"
+- "Follow @sanatanii_soch for daily भक्ति content 🙏"
+"""
 
     prompt = f"""Tu ek real Instagram spiritual content creator hai jo Hindi/Hinglish me dil-chhoo captions likhta hai.
 
