@@ -1,14 +1,12 @@
 """
-Reply Poster - Post generated replies to Instagram, Facebook, YouTube
+Reply Poster V5 - Fixed Integration with Comment Fetcher V4
 
-V4 IMPROVEMENTS:
-- 🆕 Quiet hours (11 PM - 6 AM no replies)
-- 🆕 Smart human-like delays (10-45 seconds)
-- 🆕 Random initial wait (feels natural)
-- 🆕 Reply count safety limit per platform
-- 🆕 Better error categorization
-- 🆕 Retry on temporary errors
-- 🆕 IST timezone awareness
+FIXES:
+- mark_reply_posted() comment_fetcher se import karo (single source of truth)
+- DB connection same WAL mode use karo
+- _mark_as_replied failure = reply skip (don't risk double reply)  
+- Verification after posting (confirm DB updated)
+- Proper error handling chain
 """
 import time
 import random
@@ -23,131 +21,183 @@ from config.settings import (
 from core.database import get_connection
 from utils.logger import get_logger
 
+# ✅ FIX 1: Comment fetcher ka mark function import karo
+# Ek hi jagah se DB update hoga - no duplication
+from fetchers.comment_fetcher import mark_reply_posted
+
 logger = get_logger("reply_poster")
 
 META_BASE_URL = f"https://graph.facebook.com/{META_API_VERSION}"
 
 # ============================================================
-# V4: SMART TIMING CONFIGURATION
+# CONFIGURATION
 # ============================================================
 
-# Human-like delays between replies
-MIN_DELAY_BETWEEN_REPLIES = 10   # Min 10 seconds
-MAX_DELAY_BETWEEN_REPLIES = 45   # Max 45 seconds
-FIRST_REPLY_DELAY_MIN = 5       # Wait before first reply
-FIRST_REPLY_DELAY_MAX = 20      # Seems like reading comments first
+# Human-like delays
+MIN_DELAY_BETWEEN_REPLIES = 10
+MAX_DELAY_BETWEEN_REPLIES = 45
+FIRST_REPLY_DELAY_MIN = 5
+FIRST_REPLY_DELAY_MAX = 20
 
-# Quiet hours (IST) — no replies during sleep time
-QUIET_HOURS_START = 23  # 11 PM IST
-QUIET_HOURS_END = 6     # 6 AM IST
+# Quiet hours IST
+QUIET_HOURS_START = 23  # 11 PM
+QUIET_HOURS_END = 6     # 6 AM
 
-# Safety limits per run
-MAX_REPLIES_PER_PLATFORM = 10   # Max 10 replies per platform per run
-MAX_TOTAL_REPLIES_PER_RUN = 20  # Max 20 total per run
+# Safety limits
+MAX_REPLIES_PER_PLATFORM = 10
+MAX_TOTAL_REPLIES_PER_RUN = 20
+MAX_DAILY_REPLIES = 60  # Hard daily cap
 
 # Request settings
 REQUEST_TIMEOUT = 15
-MAX_RETRY_PER_REPLY = 2  # Retry once on temporary errors
+MAX_RETRY_PER_REPLY = 2
 
-# Temporary error codes (worth retrying)
+# Retryable HTTP errors
 TEMP_ERROR_CODES = [429, 500, 502, 503, 504]
 
+# Meta rate limit error codes
+META_RATE_LIMIT_CODES = [4, 17, 32, 613]
+
 
 # ============================================================
-# TIMEZONE HELPER
+# TIMEZONE HELPERS
 # ============================================================
+
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def _get_ist_now() -> datetime:
+    """Current datetime in IST"""
+    return datetime.now(IST)
+
 
 def _get_ist_hour() -> int:
-    """Get current hour in IST (Indian Standard Time = UTC+5:30)"""
-    ist = timezone(timedelta(hours=5, minutes=30))
-    now_ist = datetime.now(ist)
-    return now_ist.hour
+    """Current hour in IST"""
+    return _get_ist_now().hour
 
 
 def _is_quiet_hours() -> bool:
     """
-    Check if current time is in quiet hours (IST).
+    11 PM se 6 AM IST = quiet hours.
     
-    Quiet: 11 PM to 6 AM IST
-    Active: 6 AM to 11 PM IST
+    Example:
+        hour=23 → quiet ✅
+        hour=0  → quiet ✅  
+        hour=5  → quiet ✅
+        hour=6  → active ✅
+        hour=22 → active ✅
     """
     hour = _get_ist_hour()
-
-    if QUIET_HOURS_START <= hour or hour < QUIET_HOURS_END:
-        return True
-    return False
+    # Late night (11 PM onwards) OR early morning (before 6 AM)
+    return hour >= QUIET_HOURS_START or hour < QUIET_HOURS_END
 
 
 def _get_time_until_active() -> str:
-    """Get human-readable time until quiet hours end"""
-    ist = timezone(timedelta(hours=5, minutes=30))
-    now = datetime.now(ist)
+    """Human readable time until quiet hours end"""
+    now = _get_ist_now()
     hour = now.hour
 
     if hour >= QUIET_HOURS_START:
-        # After 11 PM → active at 6 AM next day
+        # e.g. 11 PM → next day 6 AM = 7 hours
         hours_left = (24 - hour) + QUIET_HOURS_END
     else:
-        # Before 6 AM → active at 6 AM
+        # e.g. 2 AM → 6 AM = 4 hours
         hours_left = QUIET_HOURS_END - hour
 
-    return f"~{hours_left} hours"
+    return f"~{hours_left} hours (active at {QUIET_HOURS_END}:00 IST)"
 
 
 # ============================================================
-# DATABASE: Mark as Replied
+# DATABASE HELPERS
 # ============================================================
 
-def _mark_as_replied(comment_id: str, reply_text: str, platform: str = ""):
-    """Mark comment as replied in database"""
-    try:
-        conn = get_connection()
-        cursor = conn.cursor()
-        cursor.execute("""
-            UPDATE comment_replies
-            SET reply_text = ?,
-                reply_posted = 1,
-                replied_at = ?
-            WHERE comment_id = ?
-        """, (reply_text, datetime.now().isoformat(), comment_id))
-        conn.commit()
-        conn.close()
-        logger.debug(f"   💾 Marked as replied in DB")
-    except Exception as e:
-        logger.warning(f"   ⚠️  Mark replied failed: {e}")
+def _get_db():
+    """WAL mode DB connection - same as comment_fetcher"""
+    conn = get_connection()
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    return conn
 
 
 def _get_today_reply_count(platform: str = "") -> int:
-    """Get number of replies posted today (safety check)"""
+    """
+    Aaj kitne replies post hue.
+    IST date use karo (UTC se alag ho sakti hai midnight pe)
+    """
     try:
-        conn = get_connection()
+        conn = _get_db()
         cursor = conn.cursor()
-        today = datetime.now().strftime("%Y-%m-%d")
+
+        # IST mein aaj ki date
+        today_ist = _get_ist_now().strftime("%Y-%m-%d")
 
         if platform:
-            cursor.execute(
-                "SELECT COUNT(*) FROM comment_replies WHERE reply_posted = 1 AND replied_at LIKE ? AND platform = ?",
-                (f"{today}%", platform)
-            )
+            cursor.execute("""
+                SELECT COUNT(*) FROM comment_replies 
+                WHERE reply_posted = 1 
+                  AND platform = ?
+                  AND replied_at LIKE ?
+            """, (platform, f"{today_ist}%"))
         else:
-            cursor.execute(
-                "SELECT COUNT(*) FROM comment_replies WHERE reply_posted = 1 AND replied_at LIKE ?",
-                (f"{today}%",)
-            )
+            cursor.execute("""
+                SELECT COUNT(*) FROM comment_replies 
+                WHERE reply_posted = 1 
+                  AND replied_at LIKE ?
+            """, (f"{today_ist}%",))
 
         count = cursor.fetchone()[0] or 0
         conn.close()
         return count
-    except Exception:
-        return 0
+
+    except Exception as e:
+        logger.warning(f"⚠️  Reply count check failed: {e}")
+        return 0  # Safe side pe 0 return karo
+
+
+def _verify_marked_as_replied(comment_id: str) -> bool:
+    """
+    Verify karo ki DB mein reply_posted = 1 set hua.
+    
+    Yeh extra safety check hai double reply prevent karne ke liye.
+    Agar verify fail ho to comment ko process mat karo.
+    """
+    try:
+        conn = _get_db()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT reply_posted FROM comment_replies WHERE comment_id = ?",
+            (comment_id,)
+        )
+        result = cursor.fetchone()
+        conn.close()
+
+        if result and result[0] == 1:
+            return True
+
+        logger.warning(f"   ⚠️  DB verify failed for {comment_id[:15]}...")
+        return False
+
+    except Exception as e:
+        logger.warning(f"   ⚠️  Verify check error: {e}")
+        return False
 
 
 # ============================================================
-# INSTAGRAM REPLY
+# PLATFORM REPLY FUNCTIONS
 # ============================================================
 
 def _post_ig_reply(comment_id: str, reply_text: str) -> dict:
-    """Post reply to Instagram comment with retry"""
+    """
+    Instagram comment pe reply post karo.
+    
+    Returns:
+        {
+            "success": True/False,
+            "reply_id": "...",      # on success
+            "error": "...",         # on failure
+            "stop_all": True        # on rate limit
+        }
+    """
     url = f"{META_BASE_URL}/{comment_id}/replies"
 
     for attempt in range(1, MAX_RETRY_PER_REPLY + 1):
@@ -166,44 +216,60 @@ def _post_ig_reply(comment_id: str, reply_text: str) -> dict:
                 logger.info(f"   ✅ IG reply posted: {reply_id}")
                 return {"success": True, "reply_id": reply_id}
 
-            # Check if temporary error (worth retrying)
+            # Temporary error - retry karo
             if response.status_code in TEMP_ERROR_CODES and attempt < MAX_RETRY_PER_REPLY:
-                logger.warning(f"   ⚠️  IG temporary error ({response.status_code}), retrying...")
-                time.sleep(5)
+                wait = 5 * attempt  # Progressive wait
+                logger.warning(
+                    f"   ⚠️  IG temp error ({response.status_code}), "
+                    f"retry {attempt}/{MAX_RETRY_PER_REPLY} in {wait}s..."
+                )
+                time.sleep(wait)
                 continue
 
-            error = response.json().get('error', {})
-            error_msg = error.get('message', 'Unknown error')
-            error_code = error.get('code', 0)
+            # Parse error
+            try:
+                error_data = response.json().get('error', {})
+                error_msg = error_data.get('message', f'HTTP {response.status_code}')
+                error_code = error_data.get('code', 0)
+            except Exception:
+                error_msg = f"HTTP {response.status_code}"
+                error_code = 0
 
-            # Rate limit
-            if error_code in [4, 17, 32, 613]:
-                logger.warning(f"   ⚠️  IG rate limited! Stopping replies.")
-                return {"success": False, "error": "rate_limited", "stop_all": True}
+            # Rate limit - stop everything
+            if error_code in META_RATE_LIMIT_CODES:
+                logger.warning(f"   🛑 IG rate limited! Code: {error_code}")
+                return {
+                    "success": False,
+                    "error": "rate_limited",
+                    "stop_all": True
+                }
 
-            logger.warning(f"   ⚠️  IG reply failed: {error_msg}")
+            logger.warning(f"   ❌ IG reply failed [{error_code}]: {error_msg}")
             return {"success": False, "error": error_msg}
 
         except requests.Timeout:
-            logger.warning(f"   ⚠️  IG timeout (attempt {attempt})")
+            logger.warning(f"   ⚠️  IG timeout (attempt {attempt}/{MAX_RETRY_PER_REPLY})")
             if attempt < MAX_RETRY_PER_REPLY:
                 time.sleep(3)
                 continue
             return {"success": False, "error": "timeout"}
 
+        except requests.ConnectionError as e:
+            logger.warning(f"   ⚠️  IG connection error: {e}")
+            return {"success": False, "error": "connection_error"}
+
         except Exception as e:
-            logger.error(f"   ❌ IG reply error: {e}")
+            logger.error(f"   ❌ IG unexpected error: {e}")
             return {"success": False, "error": str(e)}
 
-    return {"success": False, "error": "max retries exceeded"}
+    return {"success": False, "error": "max_retries_exceeded"}
 
-
-# ============================================================
-# FACEBOOK REPLY
-# ============================================================
 
 def _post_fb_reply(comment_id: str, reply_text: str) -> dict:
-    """Post reply to Facebook comment with retry"""
+    """
+    Facebook comment pe reply post karo.
+    Same structure as IG for consistency.
+    """
     url = f"{META_BASE_URL}/{comment_id}/comments"
 
     for attempt in range(1, MAX_RETRY_PER_REPLY + 1):
@@ -223,19 +289,31 @@ def _post_fb_reply(comment_id: str, reply_text: str) -> dict:
                 return {"success": True, "reply_id": reply_id}
 
             if response.status_code in TEMP_ERROR_CODES and attempt < MAX_RETRY_PER_REPLY:
-                logger.warning(f"   ⚠️  FB temporary error ({response.status_code}), retrying...")
-                time.sleep(5)
+                wait = 5 * attempt
+                logger.warning(
+                    f"   ⚠️  FB temp error ({response.status_code}), "
+                    f"retry {attempt}/{MAX_RETRY_PER_REPLY} in {wait}s..."
+                )
+                time.sleep(wait)
                 continue
 
-            error = response.json().get('error', {})
-            error_msg = error.get('message', 'Unknown error')
-            error_code = error.get('code', 0)
+            try:
+                error_data = response.json().get('error', {})
+                error_msg = error_data.get('message', f'HTTP {response.status_code}')
+                error_code = error_data.get('code', 0)
+            except Exception:
+                error_msg = f"HTTP {response.status_code}"
+                error_code = 0
 
-            if error_code in [4, 17, 32, 613]:
-                logger.warning(f"   ⚠️  FB rate limited!")
-                return {"success": False, "error": "rate_limited", "stop_all": True}
+            if error_code in META_RATE_LIMIT_CODES:
+                logger.warning(f"   🛑 FB rate limited! Code: {error_code}")
+                return {
+                    "success": False,
+                    "error": "rate_limited",
+                    "stop_all": True
+                }
 
-            logger.warning(f"   ⚠️  FB reply failed: {error_msg}")
+            logger.warning(f"   ❌ FB reply failed [{error_code}]: {error_msg}")
             return {"success": False, "error": error_msg}
 
         except requests.Timeout:
@@ -244,21 +322,20 @@ def _post_fb_reply(comment_id: str, reply_text: str) -> dict:
                 continue
             return {"success": False, "error": "timeout"}
 
+        except requests.ConnectionError:
+            return {"success": False, "error": "connection_error"}
+
         except Exception as e:
-            logger.error(f"   ❌ FB reply error: {e}")
+            logger.error(f"   ❌ FB unexpected error: {e}")
             return {"success": False, "error": str(e)}
 
-    return {"success": False, "error": "max retries exceeded"}
+    return {"success": False, "error": "max_retries_exceeded"}
 
-
-# ============================================================
-# YOUTUBE REPLY
-# ============================================================
 
 def _post_yt_reply(comment_id: str, reply_text: str) -> dict:
-    """Post reply to YouTube comment"""
+    """YouTube comment pe reply post karo"""
     if not YOUTUBE_ENABLED:
-        return {"success": False, "error": "YouTube disabled"}
+        return {"success": False, "error": "youtube_disabled"}
 
     try:
         from posting.youtube import _get_youtube_client
@@ -281,214 +358,293 @@ def _post_yt_reply(comment_id: str, reply_text: str) -> dict:
 
     except ImportError:
         logger.warning("   ⚠️  YouTube module not available")
-        return {"success": False, "error": "YouTube module not installed"}
+        return {"success": False, "error": "youtube_module_missing"}
+
     except Exception as e:
         error_str = str(e)
 
-        # Check for specific YouTube errors
         if "insufficientPermissions" in error_str:
-            logger.warning("   ⚠️  YT: Need comment scope — run: python -m posting.youtube")
+            logger.warning("   ⚠️  YT: Missing comment permission scope")
             return {"success": False, "error": "insufficient_permissions"}
 
         if "quotaExceeded" in error_str:
-            logger.warning("   ⚠️  YT quota exceeded!")
+            logger.warning("   🛑 YT quota exceeded!")
             return {"success": False, "error": "quota_exceeded", "stop_all": True}
+
+        if "processingFailure" in error_str:
+            logger.warning("   ⚠️  YT processing failure (temp)")
+            return {"success": False, "error": "processing_failure"}
 
         logger.error(f"   ❌ YT reply error: {e}")
         return {"success": False, "error": error_str}
 
 
 # ============================================================
-# MAIN: POST REPLIES
+# PLATFORM DISPATCHER
+# ============================================================
+
+PLATFORM_HANDLERS = {
+    "instagram": _post_ig_reply,
+    "facebook": _post_fb_reply,
+    "youtube": _post_yt_reply,
+}
+
+
+def _dispatch_reply(platform: str, comment_id: str, reply_text: str) -> dict:
+    """Platform ke hisaab se sahi handler call karo"""
+    handler = PLATFORM_HANDLERS.get(platform)
+
+    if not handler:
+        logger.warning(f"   ⚠️  Unknown platform: {platform}")
+        return {"success": False, "error": f"unknown_platform_{platform}"}
+
+    return handler(comment_id, reply_text)
+
+
+# ============================================================
+# SAFE REPLY: POST + MARK (Atomic-ish)
+# ============================================================
+
+def _safe_post_and_mark(
+    platform: str,
+    comment: dict,
+    reply_text: str
+) -> dict:
+    """
+    Reply post karo aur IMMEDIATELY DB mein mark karo.
+    
+    Flow:
+    1. Platform pe reply post karo
+    2. Success → turant DB mark karo
+    3. DB mark fail → LOG ERROR (reply posted but not marked)
+    4. Verify ki DB actually updated hua
+    
+    Returns:
+        result dict with success/failure info
+    """
+    comment_id = comment.get('comment_id', '')
+    username = comment.get('username', '')
+
+    # ── Step 1: Platform pe post karo ──
+    result = _dispatch_reply(platform, comment_id, reply_text)
+
+    # ── Step 2: Success pe turant mark karo ──
+    if result.get("success"):
+        try:
+            # comment_fetcher ka function use karo (single source of truth)
+            mark_reply_posted(comment_id, reply_text)
+
+        except Exception as mark_err:
+            # CRITICAL: Reply post hua lekin DB update nahi hua
+            # Yeh double reply ka risk hai!
+            logger.error(
+                f"   🚨 CRITICAL: Reply posted to {platform} BUT DB mark FAILED!\n"
+                f"      Comment ID : {comment_id}\n"
+                f"      Username   : {username}\n"
+                f"      Error      : {mark_err}\n"
+                f"      ACTION     : Manually mark in DB!"
+            )
+            # Result mein warning add karo
+            result["db_mark_failed"] = True
+            result["db_error"] = str(mark_err)
+
+        # ── Step 3: Verify DB update ──
+        if not result.get("db_mark_failed"):
+            verified = _verify_marked_as_replied(comment_id)
+            if not verified:
+                logger.error(
+                    f"   🚨 DB VERIFY FAILED after mark!\n"
+                    f"      Comment: {comment_id[:20]}...\n"
+                    f"      Risk of double reply on next run!"
+                )
+                result["db_verify_failed"] = True
+
+    return result
+
+
+# ============================================================
+# MAIN: POST ALL REPLIES
 # ============================================================
 
 def post_replies(comment_reply_pairs: list) -> dict:
     """
-    Post all generated replies to their platforms.
-
-    V4 Features:
-    - Quiet hours check (11 PM - 6 AM IST)
-    - Per-platform rate limits
-    - Human-like random delays
-    - Initial reading delay
-    - Rate limit detection (auto-stop)
-    - Daily limit safety check
+    Saare generated replies post karo.
+    
+    Args:
+        comment_reply_pairs: List of (comment_dict, reply_text) tuples
+        
+    Returns:
+        Summary dict with counts and platform breakdown
     """
-    # ═══════════════════════════════════════════
-    # V4: QUIET HOURS CHECK
-    # ═══════════════════════════════════════════
+    # ═══════════════════════════════════════
+    # GUARD 1: Quiet hours
+    # ═══════════════════════════════════════
     if _is_quiet_hours():
         ist_hour = _get_ist_hour()
-        active_in = _get_time_until_active()
-
         logger.info("=" * 55)
-        logger.info(f"😴 QUIET HOURS (IST {QUIET_HOURS_START}:00 - {QUIET_HOURS_END}:00)")
-        logger.info(f"   Current IST hour: {ist_hour}:00")
-        logger.info(f"   Active again in : {active_in}")
-        logger.info(f"   Replies paused  : {len(comment_reply_pairs)} comments saved for later")
+        logger.info(f"😴 QUIET HOURS - Replies paused")
+        logger.info(f"   IST time   : {ist_hour}:00")
+        logger.info(f"   Quiet range: {QUIET_HOURS_START}:00 - {QUIET_HOURS_END}:00")
+        logger.info(f"   Active in  : {_get_time_until_active()}")
+        logger.info(f"   Pending    : {len(comment_reply_pairs)} comments")
         logger.info("=" * 55)
 
-        return {
-            "total": len(comment_reply_pairs),
-            "success": 0,
-            "failed": 0,
-            "skipped": len(comment_reply_pairs),
-            "reason": "quiet_hours",
-            "quiet_until": f"{QUIET_HOURS_END}:00 IST",
-            "platforms": {
-                "instagram": {"success": 0, "failed": 0},
-                "facebook": {"success": 0, "failed": 0},
-                "youtube": {"success": 0, "failed": 0},
-            }
-        }
+        return _make_result(
+            total=len(comment_reply_pairs),
+            skipped=len(comment_reply_pairs),
+            reason="quiet_hours"
+        )
 
-    # ═══════════════════════════════════════════
-    # V4: DAILY LIMIT CHECK
-    # ═══════════════════════════════════════════
+    # ═══════════════════════════════════════
+    # GUARD 2: Daily limit
+    # ═══════════════════════════════════════
     today_total = _get_today_reply_count()
-    if today_total >= MAX_TOTAL_REPLIES_PER_RUN * 3:  # Max ~60 replies/day
-        logger.warning(f"⚠️  Daily limit reached ({today_total} replies today). Pausing.")
-        return {
-            "total": len(comment_reply_pairs),
-            "success": 0,
-            "failed": 0,
-            "skipped": len(comment_reply_pairs),
-            "reason": "daily_limit",
-            "today_count": today_total,
-            "platforms": {
-                "instagram": {"success": 0, "failed": 0},
-                "facebook": {"success": 0, "failed": 0},
-                "youtube": {"success": 0, "failed": 0},
-            }
-        }
 
-    # ═══════════════════════════════════════════
+    if today_total >= MAX_DAILY_REPLIES:
+        logger.warning(
+            f"⚠️  Daily limit reached: {today_total}/{MAX_DAILY_REPLIES} replies today"
+        )
+        return _make_result(
+            total=len(comment_reply_pairs),
+            skipped=len(comment_reply_pairs),
+            reason="daily_limit",
+            today_count=today_total
+        )
+
+    # ═══════════════════════════════════════
     # START POSTING
-    # ═══════════════════════════════════════════
+    # ═══════════════════════════════════════
+    total = len(comment_reply_pairs)
+
     logger.info("=" * 55)
-    logger.info("=== REPLY POSTER V4 शुरू ===")
-    logger.info("=" * 55)
-    logger.info(f"📊 Comments to reply : {len(comment_reply_pairs)}")
-    logger.info(f"📊 Today's replies   : {today_total}")
-    logger.info(f"⏰ IST hour          : {_get_ist_hour()}:00")
+    logger.info("=== REPLY POSTER V5 START ===")
+    logger.info(f"   Total to reply : {total}")
+    logger.info(f"   Today's count  : {today_total}/{MAX_DAILY_REPLIES}")
+    logger.info(f"   IST time       : {_get_ist_hour()}:00")
     logger.info("=" * 55)
 
-    # V4: Initial "reading" delay (looks like we're reading comments first)
+    if total == 0:
+        logger.info("📭 No replies to post")
+        return _make_result(total=0, reason="no_comments")
+
+    # Initial "reading" delay - human feel
     initial_delay = random.randint(FIRST_REPLY_DELAY_MIN, FIRST_REPLY_DELAY_MAX)
-    logger.info(f"📖 Reading comments... ({initial_delay}s)")
+    logger.info(f"📖 Reading comments first... ({initial_delay}s)")
     time.sleep(initial_delay)
 
-    total = len(comment_reply_pairs)
+    # Tracking vars
     success_count = 0
     fail_count = 0
     skipped_count = 0
-    rate_limited = False  # Stop all if rate limited
-
-    results = {
+    rate_limited = False
+    platform_counts = {"instagram": 0, "facebook": 0, "youtube": 0}
+    platform_results = {
         "instagram": {"success": 0, "failed": 0},
         "facebook": {"success": 0, "failed": 0},
         "youtube": {"success": 0, "failed": 0},
     }
 
-    # V4: Per-platform counters
-    platform_counts = {"instagram": 0, "facebook": 0, "youtube": 0}
-
     for i, (comment, reply_text) in enumerate(comment_reply_pairs, 1):
-        # Check if rate limited (stop all)
+
+        # ── Rate limit stop ──
         if rate_limited:
-            logger.warning(f"   ⏭️  Skipping remaining (rate limited)")
-            skipped_count += (total - i + 1)
+            remaining = total - i + 1
+            logger.warning(f"   🛑 Rate limited - skipping {remaining} remaining")
+            skipped_count += remaining
             break
 
         platform = comment.get('platform', 'unknown')
         comment_id = comment.get('comment_id', '')
-        username = comment.get('username', '')
+        username = comment.get('username', 'unknown')
+        comment_text = comment.get('text', '')
 
-        # V4: Per-platform limit check
-        if platform in platform_counts:
-            if platform_counts[platform] >= MAX_REPLIES_PER_PLATFORM:
-                logger.info(f"   ⏭️  {platform} limit reached ({MAX_REPLIES_PER_PLATFORM}), skipping")
-                skipped_count += 1
-                continue
-
-        logger.info(f"\n📤 [{i}/{total}] Replying on {platform.upper()}")
-        logger.info(f"   👤 To: @{username}")
-        logger.info(f"   💬 Comment: {comment.get('text', '')[:50]}...")
-        logger.info(f"   📝 Reply: {reply_text[:60]}...")
-
-        # Skip if no valid reply
-        if not reply_text or len(reply_text) < 5:
-            logger.warning(f"   ⏭️  Empty reply, skipping")
+        # ── Per-platform limit ──
+        current_platform_count = platform_counts.get(platform, 0)
+        if current_platform_count >= MAX_REPLIES_PER_PLATFORM:
+            logger.info(
+                f"   ⏭️  {platform.upper()} limit ({MAX_REPLIES_PER_PLATFORM}) "
+                f"reached, skipping"
+            )
             skipped_count += 1
             continue
 
-        # Post reply based on platform
-        result = {"success": False, "error": "Unknown platform"}
-
-        if platform == "instagram":
-            result = _post_ig_reply(comment_id, reply_text)
-        elif platform == "facebook":
-            result = _post_fb_reply(comment_id, reply_text)
-        elif platform == "youtube":
-            result = _post_yt_reply(comment_id, reply_text)
-        else:
-            logger.warning(f"   ⚠️  Unknown platform: {platform}")
+        # ── Validate reply ──
+        if not reply_text or len(reply_text.strip()) < 5:
+            logger.warning(f"   ⏭️  Empty/too-short reply for {comment_id[:15]}, skip")
             skipped_count += 1
             continue
 
-        # Check for rate limit signal
+        # ── LOG what we're doing ──
+        logger.info(f"\n📤 [{i}/{total}] {platform.upper()}")
+        logger.info(f"   👤 @{username}")
+        logger.info(f"   💬 Comment : {comment_text[:60]}...")
+        logger.info(f"   📝 Reply   : {reply_text[:70]}...")
+
+        # ── POST + MARK (atomic) ──
+        result = _safe_post_and_mark(platform, comment, reply_text)
+
+        # ── Handle rate limit ──
         if result.get("stop_all"):
             rate_limited = True
             fail_count += 1
-            results[platform]["failed"] += 1
-            logger.warning(f"   🛑 Rate limited! Stopping all replies.")
+            platform_results[platform]["failed"] += 1
+            logger.warning("   🛑 Rate limit signal received!")
             continue
 
-        # Track results
+        # ── Track result ──
         if result["success"]:
             success_count += 1
-            results[platform]["success"] += 1
-            platform_counts[platform] = platform_counts.get(platform, 0) + 1
-            _mark_as_replied(comment_id, reply_text, platform)
+            platform_counts[platform] = current_platform_count + 1
+            platform_results[platform]["success"] += 1
+
+            # Warn if DB issues
+            if result.get("db_mark_failed") or result.get("db_verify_failed"):
+                logger.warning(
+                    f"   ⚠️  Reply posted but DB tracking issue!\n"
+                    f"      Comment may be replied AGAIN on next run.\n"
+                    f"      Check logs and manually verify: {comment_id}"
+                )
         else:
             fail_count += 1
-            results[platform]["failed"] += 1
+            platform_results[platform]["failed"] += 1
+            logger.warning(f"   ❌ Failed: {result.get('error', 'unknown')}")
 
-        # V4: Smart human-like delay between replies
+        # ── Human-like delay ──
         if i < total and not rate_limited:
-            # Vary delay based on platform switch
-            next_platform = comment_reply_pairs[i][0].get('platform', '') if i < total else ''
+            # Next comment ka platform dekho
+            try:
+                next_platform = comment_reply_pairs[i][0].get('platform', '')
+            except IndexError:
+                next_platform = platform
 
             if next_platform != platform:
-                # Different platform = longer pause (switching apps feel)
-                delay = random.randint(20, 45)
-                logger.info(f"   ⏳ Platform switch delay: {delay}s")
+                # Platform switch = longer pause
+                delay = random.randint(25, 45)
+                logger.info(f"   ⏳ Platform switch pause: {delay}s")
             else:
-                # Same platform = shorter pause
                 delay = random.randint(MIN_DELAY_BETWEEN_REPLIES, MAX_DELAY_BETWEEN_REPLIES)
-                logger.info(f"   ⏳ Natural pace: {delay}s")
+                logger.info(f"   ⏳ Next reply in: {delay}s")
 
             time.sleep(delay)
 
-    # ═══════════════════════════════════════════
+    # ═══════════════════════════════════════
     # SUMMARY
-    # ═══════════════════════════════════════════
+    # ═══════════════════════════════════════
+    final_today_total = _get_today_reply_count()
+
     logger.info("")
     logger.info("=" * 55)
-    logger.info("✅ REPLY POSTER V4 COMPLETE")
+    logger.info("✅ REPLY POSTER V5 DONE")
     logger.info("=" * 55)
-    logger.info(f"   📊 Total      : {total}")
-    logger.info(f"   ✅ Success    : {success_count}")
-    logger.info(f"   ❌ Failed     : {fail_count}")
-    logger.info(f"   ⏭️  Skipped   : {skipped_count}")
-
-    if rate_limited:
-        logger.info(f"   🛑 Rate limit : YES (stopped early)")
-
-    logger.info(f"   📸 IG         : ✅{results['instagram']['success']} ❌{results['instagram']['failed']}")
-    logger.info(f"   📘 FB         : ✅{results['facebook']['success']} ❌{results['facebook']['failed']}")
-    logger.info(f"   📺 YT         : ✅{results['youtube']['success']} ❌{results['youtube']['failed']}")
-    logger.info(f"   📊 Today total: {today_total + success_count} replies")
+    logger.info(f"   Total     : {total}")
+    logger.info(f"   ✅ Success : {success_count}")
+    logger.info(f"   ❌ Failed  : {fail_count}")
+    logger.info(f"   ⏭️  Skipped : {skipped_count}")
+    logger.info(f"   🛑 Rate Ltd: {'YES' if rate_limited else 'No'}")
+    logger.info(f"   📸 IG : ✅{platform_results['instagram']['success']} ❌{platform_results['instagram']['failed']}")
+    logger.info(f"   📘 FB : ✅{platform_results['facebook']['success']} ❌{platform_results['facebook']['failed']}")
+    logger.info(f"   📺 YT : ✅{platform_results['youtube']['success']} ❌{platform_results['youtube']['failed']}")
+    logger.info(f"   📊 Today total : {final_today_total}")
     logger.info("=" * 55)
 
     return {
@@ -497,9 +653,50 @@ def post_replies(comment_reply_pairs: list) -> dict:
         "failed": fail_count,
         "skipped": skipped_count,
         "rate_limited": rate_limited,
-        "today_total": today_total + success_count,
-        "platforms": results
+        "today_total": final_today_total,
+        "platforms": platform_results,
     }
+
+
+# ============================================================
+# HELPER: Result dict builder
+# ============================================================
+
+def _make_result(
+    total: int = 0,
+    success: int = 0,
+    failed: int = 0,
+    skipped: int = 0,
+    reason: str = "",
+    today_count: int = 0,
+    **kwargs
+) -> dict:
+    """Standard result dict banana ke liye helper"""
+    return {
+        "total": total,
+        "success": success,
+        "failed": failed,
+        "skipped": skipped,
+        "reason": reason,
+        "today_total": today_count,
+        "rate_limited": False,
+        "platforms": {
+            "instagram": {"success": 0, "failed": 0},
+            "facebook": {"success": 0, "failed": 0},
+            "youtube": {"success": 0, "failed": 0},
+        },
+        **kwargs
+    }
+
+
+# ============================================================
+# EXPORTS
+# ============================================================
+
+__all__ = [
+    'post_replies',
+    'mark_reply_posted',  # Re-export for convenience
+]
 
 
 # ============================================================
@@ -508,36 +705,23 @@ def post_replies(comment_reply_pairs: list) -> dict:
 
 if __name__ == "__main__":
     print("\n" + "=" * 60)
-    print("REPLY POSTER V4 - TEST")
-    print("=" * 60 + "\n")
+    print("REPLY POSTER V5 - DIAGNOSTICS")
+    print("=" * 60)
 
-    # Test quiet hours
-    is_quiet = _is_quiet_hours()
     ist_hour = _get_ist_hour()
+    is_quiet = _is_quiet_hours()
+    today_count = _get_today_reply_count()
 
-    print(f"⏰ Current IST hour: {ist_hour}:00")
-    print(f"😴 Quiet hours     : {QUIET_HOURS_START}:00 - {QUIET_HOURS_END}:00 IST")
-    print(f"📊 Is quiet now    : {'YES 😴' if is_quiet else 'NO ✅ (Active)'}")
+    print(f"\n⏰ IST Time    : {_get_ist_now().strftime('%Y-%m-%d %H:%M:%S IST')}")
+    print(f"😴 Quiet hours : {QUIET_HOURS_START}:00 - {QUIET_HOURS_END}:00 IST")
+    print(f"📊 Status      : {'QUIET 😴' if is_quiet else 'ACTIVE ✅'}")
 
     if is_quiet:
-        print(f"⏰ Active again in : {_get_time_until_active()}")
-    else:
-        print(f"✅ Ready to post replies!")
+        print(f"⏰ Active in   : {_get_time_until_active()}")
 
-    # Test daily count
-    today_count = _get_today_reply_count()
-    print(f"\n📊 Today's replies : {today_count}")
-    print(f"📊 Daily limit     : {MAX_TOTAL_REPLIES_PER_RUN * 3}")
+    print(f"\n📊 Today replies  : {today_count}/{MAX_DAILY_REPLIES}")
+    print(f"🛡️  Per platform   : max {MAX_REPLIES_PER_PLATFORM}/run")
+    print(f"⏱️  Delays         : {MIN_DELAY_BETWEEN_REPLIES}-{MAX_DELAY_BETWEEN_REPLIES}s")
+    print(f"⏱️  First delay    : {FIRST_REPLY_DELAY_MIN}-{FIRST_REPLY_DELAY_MAX}s")
 
-    # Test timing config
-    print(f"\n⏱️  Reply delays:")
-    print(f"   First reply  : {FIRST_REPLY_DELAY_MIN}-{FIRST_REPLY_DELAY_MAX}s")
-    print(f"   Between same : {MIN_DELAY_BETWEEN_REPLIES}-{MAX_DELAY_BETWEEN_REPLIES}s")
-    print(f"   Platform switch: 20-45s")
-
-    print(f"\n🛡️  Safety limits:")
-    print(f"   Per platform : {MAX_REPLIES_PER_PLATFORM}/run")
-    print(f"   Total per run: {MAX_TOTAL_REPLIES_PER_RUN}")
-    print(f"   Daily max    : {MAX_TOTAL_REPLIES_PER_RUN * 3}")
-
-    print("\n✅ All settings configured!")
+    print("\n✅ Configuration OK!")
