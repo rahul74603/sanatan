@@ -449,7 +449,10 @@ def _clean_caption(caption: str) -> str:
     """
     Remove AI artifacts and clean caption.
 
-    V2.1 FIXES:
+    V3 FIXES:
+    - Remove instruction leak text (Word Count Check, Structure Check, etc.)
+    - Remove meta-analysis lines
+    - Remove markdown headers
     - Remove position markers like (1), (32), (36
     - Remove numbered list prefixes 1) 2) etc.
     - Remove word count annotations
@@ -485,6 +488,38 @@ def _clean_caption(caption: str) -> str:
     caption = re.sub(r'```[\w]*\n?', '', caption)
     caption = caption.replace('```', '')
 
+    # 🆕 V3: Remove AI meta-analysis lines (bahut common leak)
+    # Removes lines like:
+    #   "Word Count Check (Hindi words):"
+    #   "Structure Check:"
+    #   "Length Analysis:"
+    #   "Emoji Count:"
+    #   "Validation:"
+    meta_patterns = [
+        r'(?im)^.*word\s*count\s*check.*$',
+        r'(?im)^.*structure\s*check.*$',
+        r'(?im)^.*length\s*analysis.*$',
+        r'(?im)^.*emoji\s*count.*$',
+        r'(?im)^.*validation.*$',
+        r'(?im)^.*character\s*count.*$',
+        r'(?im)^.*hashtag\s*count.*$',
+        r'(?im)^.*analysis.*:.*$',
+        r'(?im)^\s*note:.*$',
+        r'(?im)^\s*explanation:.*$',
+        r'(?im)^\s*breakdown:.*$',
+        r'(?im)^\s*[-•]\s*length:.*$',
+        r'(?im)^\s*[-•]\s*words:.*$',
+        r'(?im)^\s*[-•]\s*emojis:.*$',
+    ]
+    for pattern in meta_patterns:
+        caption = re.sub(pattern, '', caption)
+
+    # 🆕 V3: Remove markdown headers (###, ##, #)
+    caption = re.sub(r'(?m)^#{1,6}\s+.*$', '', caption)
+
+    # 🆕 V3: Remove separator lines (---, ===, ***)
+    caption = re.sub(r'(?m)^\s*[-=*_]{3,}\s*$', '', caption)
+
     # 🆕 V2.1: Remove position markers like (1), (32), (36
     caption = re.sub(r'\(\d+\)', '', caption)        # (1), (32), (100)
     caption = re.sub(r'\s\(\d+\s', ' ', caption)     # ' (32 ' → ' '
@@ -513,9 +548,15 @@ def _clean_caption(caption: str) -> str:
     # Remove extra spaces
     caption = re.sub(r' +', ' ', caption)
 
-    # Trim per line
+    # Trim per line + remove empty lines that resulted from meta removal
     lines = caption.split('\n')
     lines = [line.strip() for line in lines]
+    # Remove empty lines that appear at start
+    while lines and not lines[0]:
+        lines.pop(0)
+    # Remove empty lines that appear at end
+    while lines and not lines[-1]:
+        lines.pop()
     caption = '\n'.join(lines)
 
     return caption.strip()
