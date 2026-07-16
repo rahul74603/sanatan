@@ -2,20 +2,28 @@ name: 🤖 Auto Comment Reply (Every 30 min)
 
 on:
   schedule:
-    # Every 30 minutes (24x7)
     - cron: '*/30 * * * *'
-  
-  # Manual trigger
   workflow_dispatch:
 
 jobs:
   reply-comments:
     runs-on: ubuntu-latest
-    timeout-minutes: 10  # Quick job — just fetch + reply
+    timeout-minutes: 10
     
     steps:
       - name: 📥 Checkout code
         uses: actions/checkout@v4
+      
+      # ═══════════════════════════════════════════
+      # 💾 RESTORE DB from cache
+      # ═══════════════════════════════════════════
+      - name: 💾 Restore engagement DB from cache
+        uses: actions/cache/restore@v4
+        with:
+          path: divine_poster.db
+          key: engagement-db-latest
+          restore-keys: |
+            engagement-db-
       
       - name: 🐍 Setup Python 3.11
         uses: actions/setup-python@v5
@@ -56,6 +64,17 @@ jobs:
           GOOGLE_APPLICATION_CREDENTIALS: spiritual-service-account.json
         run: |
           python main.py engage
+      
+      # ═══════════════════════════════════════════
+      # 💾 SAVE DB back to cache (for next run)
+      # Uses timestamp key so latest always wins
+      # ═══════════════════════════════════════════
+      - name: 💾 Save engagement DB to cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: divine_poster.db
+          key: engagement-db-${{ github.run_id }}-${{ github.run_attempt }}
       
       - name: 🗑️ Cleanup credentials
         if: always()
