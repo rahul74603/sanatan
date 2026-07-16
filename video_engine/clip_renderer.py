@@ -215,72 +215,75 @@ def _fit_image_to_target(img: Image.Image, target_w: int, target_h: int) -> Imag
 # ============================================================
 
 def _apply_zoom_in(clip: ImageClip, duration: float, zoom_factor: float = ZOOM_MAX):
-    """
-    Slowly zoom into image over duration.
-    Starts at 1.0x, ends at zoom_factor (e.g., 1.15x)
-    """
+    """V4: Smooth ease-in-out zoom (not linear — more cinematic)"""
+    import math
+
     def zoom_func(t):
-        # Linear zoom progression
+        # Ease-in-out curve (smooth start and end)
         progress = t / duration
-        current_zoom = 1.0 + (zoom_factor - 1.0) * progress
+        eased = 0.5 * (1 - math.cos(progress * math.pi))  # Smooth S-curve
+        current_zoom = 1.0 + (zoom_factor - 1.0) * eased
         return current_zoom
 
     return clip.resize(zoom_func)
 
 
 def _apply_zoom_out(clip: ImageClip, duration: float, zoom_factor: float = ZOOM_MAX):
-    """
-    Slowly zoom out from image over duration.
-    Starts at zoom_factor, ends at 1.0x
-    """
+    """V4: Smooth ease-in-out zoom out"""
+    import math
+
     def zoom_func(t):
         progress = t / duration
-        current_zoom = zoom_factor - (zoom_factor - 1.0) * progress
+        eased = 0.5 * (1 - math.cos(progress * math.pi))
+        current_zoom = zoom_factor - (zoom_factor - 1.0) * eased
         return current_zoom
 
     return clip.resize(zoom_func)
 
 
 def _apply_pan_left(clip: ImageClip, duration: float, distance_ratio: float = PAN_DISTANCE_RATIO):
-    """
-    Pan camera from right to left.
-    Slight zoom (1.05x) to prevent black bars.
-    """
-    # Get clip dimensions
+    """V4: Smooth pan left with ease curve"""
+    import math
     w, h = clip.size
-
-    # Zoom slightly to have pan room
-    clip = clip.resize(1.10)
-
-    # Calculate pan distance in pixels
+    clip = clip.resize(1.12)  # V4: Slightly more zoom for smoother pan
     pan_distance = int(w * distance_ratio)
 
     def position_func(t):
-        # Move from +pan_distance/2 to -pan_distance/2 over duration
         progress = t / duration
-        x_offset = pan_distance / 2 - (pan_distance * progress)
+        eased = 0.5 * (1 - math.cos(progress * math.pi))
+        x_offset = pan_distance / 2 - (pan_distance * eased)
         return (x_offset, 'center')
 
     return clip.set_position(position_func)
 
 
 def _apply_pan_right(clip: ImageClip, duration: float, distance_ratio: float = PAN_DISTANCE_RATIO):
-    """Pan camera from left to right"""
+    """V4: Smooth pan right with ease curve"""
+    import math
     w, h = clip.size
-    clip = clip.resize(1.10)
+    clip = clip.resize(1.12)
     pan_distance = int(w * distance_ratio)
 
     def position_func(t):
         progress = t / duration
-        x_offset = -pan_distance / 2 + (pan_distance * progress)
+        eased = 0.5 * (1 - math.cos(progress * math.pi))
+        x_offset = -pan_distance / 2 + (pan_distance * eased)
         return (x_offset, 'center')
 
     return clip.set_position(position_func)
 
 
 def _apply_static(clip: ImageClip, duration: float):
-    """No effect - static image (slight zoom for visual interest)"""
-    return clip.resize(1.02)  # Very subtle 2% zoom for slight movement
+    """V4: Very subtle slow zoom (barely noticeable but adds life)"""
+    import math
+
+    def zoom_func(t):
+        progress = t / duration
+        # Super subtle: 1.0 → 1.03 (3% zoom over entire duration)
+        eased = 0.5 * (1 - math.cos(progress * math.pi))
+        return 1.0 + 0.03 * eased
+
+    return clip.resize(zoom_func)
 
 
 # ============================================================

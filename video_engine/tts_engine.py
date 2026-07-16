@@ -164,12 +164,14 @@ def _clean_text_for_tts(text: str) -> str:
 
 def _build_ssml(text: str) -> str:
     """
-    Build SSML with better pause control
+    🆕 V4: Enhanced SSML with dramatic narration feel.
 
     Adds:
-    - Longer pauses at periods
-    - Medium pauses at commas
-    - Emphasis markers (subtle)
+    - Longer dramatic pauses at key moments
+    - Emphasis on deity names and important words
+    - Breathing pauses for natural flow
+    - Paragraph breaks for scene changes
+    - Speed variation for emotional impact
     """
     # Escape XML special characters
     text = text.replace('&', '&amp;')
@@ -178,20 +180,82 @@ def _build_ssml(text: str) -> str:
     text = text.replace('"', '&quot;')
     text = text.replace("'", '&apos;')
 
-    # Add pauses at sentence endings (natural for narration)
-    text = re.sub(r'\.\s+', '. <break time="400ms"/> ', text)
-    text = re.sub(r'!\s+', '! <break time="500ms"/> ', text)
-    text = re.sub(r'\?\s+', '? <break time="500ms"/> ', text)
-    text = re.sub(r'।\s+', '। <break time="400ms"/> ', text)  # Devanagari full stop
+    # ═══════════════════════════════════════════
+    # 🆕 V4: DRAMATIC PAUSES (longer, more natural)
+    # ═══════════════════════════════════════════
 
-    # Add small pauses at commas (natural rhythm)
-    text = re.sub(r',\s+', ', <break time="200ms"/> ', text)
+    # Sentence endings — LONGER pauses (storytelling feel)
+    text = re.sub(r'\.\s+', '. <break time="600ms"/> ', text)
+    text = re.sub(r'!\s+', '! <break time="700ms"/> ', text)
+    text = re.sub(r'\?\s+', '? <break time="800ms"/> ', text)  # Questions need more pause
+    text = re.sub(r'।\s+', '। <break time="600ms"/> ', text)  # Hindi purna viram
 
-    # Paragraph breaks (bigger pause)
-    text = text.replace('\n\n', ' <break time="700ms"/> ')
-    text = text.replace('\n', ' <break time="300ms"/> ')
+    # Commas — medium pauses (breathing room)
+    text = re.sub(r',\s+', ', <break time="300ms"/> ', text)
 
-    # Wrap in SSML
+    # Paragraph breaks — BIG dramatic pauses (scene change feel)
+    text = text.replace('\n\n', ' <break time="1000ms"/> ')  # 1 second!
+    text = text.replace('\n', ' <break time="500ms"/> ')
+
+    # ═══════════════════════════════════════════
+    # 🆕 V4: EMPHASIS on deity names (dramatic feel)
+    # ═══════════════════════════════════════════
+
+    # Deity names get EMPHASIS
+    deity_names = [
+        'कृष्ण', 'कान्हा', 'श्रीकृष्ण', 'गोविंद',
+        'शिव', 'महादेव', 'भोलेनाथ', 'शंकर', 'महाकाल',
+        'हनुमान', 'बजरंगबली', 'पवन पुत्र', 'संकट मोचन',
+        'गणेश', 'गणपति', 'बाप्पा', 'गजानन',
+        'दुर्गा', 'काली', 'पार्वती', 'शेरावाली',
+        'राम', 'सीता', 'लक्ष्मण', 'रावण',
+        'भगवान', 'प्रभु', 'ईश्वर',
+    ]
+
+    for name in deity_names:
+        # Add slight pause before deity name + emphasis
+        text = text.replace(
+            name,
+            f'<break time="200ms"/><emphasis level="moderate">{name}</emphasis>'
+        )
+
+    # ═══════════════════════════════════════════
+    # 🆕 V4: DRAMATIC HOOKS (first sentence slower)
+    # ═══════════════════════════════════════════
+
+    # Add dramatic pause after "क्या आप जानते हैं" type hooks
+    hook_phrases = [
+        'क्या आप जानते हैं',
+        'एक बार की बात है',
+        'बहुत समय पहले',
+        'आज हम बताएंगे',
+        'सुनिए ये कहानी',
+    ]
+
+    for phrase in hook_phrases:
+        text = text.replace(
+            phrase,
+            f'<prosody rate="slow">{phrase}</prosody><break time="500ms"/>'
+        )
+
+    # ═══════════════════════════════════════════
+    # 🆕 V4: EMOTIONAL MOMENTS (slower for impact)
+    # ═══════════════════════════════════════════
+
+    emotional_words = [
+        'रोते हुए', 'आंखों में आंसू', 'दिल टूट गया',
+        'चमत्कार', 'अद्भुत', 'हैरान',
+        'विजय', 'जीत', 'हार',
+        'Save करें', 'Share करें',
+    ]
+
+    for word in emotional_words:
+        text = text.replace(
+            word,
+            f'<prosody rate="slow"><emphasis level="strong">{word}</emphasis></prosody>'
+        )
+
+    # Wrap in SSML speak tag
     ssml = f'<speak>{text}</speak>'
 
     return ssml

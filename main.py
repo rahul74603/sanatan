@@ -104,8 +104,12 @@ logger = get_logger("main")
 # ============================================================
 
 MAX_IMAGE_QUALITY_RETRIES = 3
-HUMAN_DELAY_MIN = 0
-HUMAN_DELAY_MAX = 180
+
+# 🆕 V4: Delay only before posting (after content is ready)
+# No pre-delay — video/image builds immediately
+# Random 1-5 min wait before actual posting (natural feel)
+HUMAN_DELAY_MIN = 60    # 1 minute minimum
+HUMAN_DELAY_MAX = 300   # 5 minutes maximum
 
 AGENT_TIMEOUTS = {
     "planner":   30,
@@ -118,9 +122,8 @@ AGENT_TIMEOUTS = {
     "publisher": 300,
     "analytics": 120,
     "carousel":  600,
-    "reel":      1800,  # 🆕 30 min for full reel build
+    "reel":      1800,
 }
-
 
 # ============================================================
 # AGENT EXECUTION WRAPPER
@@ -1461,10 +1464,15 @@ def run_evening_smart() -> dict:
     Used by auto_evening.yml workflow (8 PM daily).
     """
     from core.database import (
+        initialize_database,
         get_todays_content_type,
         get_carousel_days_this_week,
         DAY_NAMES
     )
+
+    # 🆕 FIX: Initialize DB first (GitHub Actions has fresh environment)
+    initialize_database()
+
 
     logger.info("")
     log_header(logger, "🌙 SMART EVENING POST (8 PM)", char="═")
@@ -1701,9 +1709,59 @@ def _run_cli():
                     print(f"📺 YT Short: https://youtube.com/shorts/{result['yt_video_id']}")
 
             sys.exit(0 if status in ["success", "partial"] else 2)
+        # ── 🆕 V3: ENGAGEMENT (Auto Comment Reply) ───────────
+        elif command == "engage":
+            logger.info("🤖 ENGAGEMENT MODE (Auto Comment Reply)")
+
+            try:
+                from engagement.engagement_agent import run as run_engagement
+                result = run_engagement()
+
+                status = result.get('status', 'unknown')
+                print(f"\n🤖 Engagement: {status}")
+                print(f"   Comments found : {result.get('comments_found', 0)}")
+                print(f"   Replies posted : {result.get('replies_posted', 0)}")
+                print(f"   Duration       : {result.get('duration', 0)}s")
+
+                sys.exit(0 if status in ["success", "no_comments"] else 2)
+
+            except ImportError as e:
+                logger.error(f"❌ Engagement module not installed: {e}")
+                print(f"\n❌ Missing module: {e}")
+                sys.exit(2)
+            except Exception as e:
+                logger.error(f"❌ Engagement failed: {e}")
+                print(f"\n❌ Error: {e}")
+                sys.exit(2)
+
+        # ── 🆕 V3: ENGAGEMENT STATS ──────────────────────────
+        elif command == "engage-stats":
+            logger.info("📊 ENGAGEMENT STATS")
+
+            try:
+                from engagement.engagement_agent import get_engagement_stats
+                stats = get_engagement_stats()
+
+                print(f"\n📊 ENGAGEMENT STATS:")
+                print(f"   Total replied : {stats['total_replied']}")
+                print(f"   Today replied : {stats['today_replied']}")
+                print(f"   Pending       : {stats['pending']}")
+                print(f"   Platforms     : {stats['platforms']}")
+
+            except Exception as e:
+                print(f"❌ Stats failed: {e}")
+            return
+
+               # ── 🆕 V4: POSTING INSIGHTS ──────────────────────────
+        elif command == "insights":
+            logger.info("📊 POSTING TIME INSIGHTS")
+            from core.database import display_posting_insights
+            display_posting_insights()
+            return
 
         # ── 🆕 V2.1: SCHEDULE INFO ───────────────────────────
         elif command == "schedule":
+    
             logger.info("📅 WEEKLY SCHEDULE INFO")
             from core.database import display_schedule
             display_schedule()
@@ -1838,7 +1896,11 @@ def _run_cli():
 ║  python main.py recovery-stats → Show status      ║
 ║  python main.py recovery-cleanup → Clean old      ║
 ║                                                   ║
-║ ║  🆕 V2.1 SMART SCHEDULING:                      ║
+║  🆕 V3 ENGAGEMENT (Auto Reply):                   ║
+║  python main.py engage         → Auto reply bot   ║
+║  python main.py engage-stats   → Reply stats      ║
+║                                                   ║
+║  🆕 V2.1 SMART SCHEDULING:                        ║
 ║  python main.py evening-smart  → 8PM auto route   ║
 ║  python main.py schedule       → Week's schedule  ║
 ║                                                   ║

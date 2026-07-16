@@ -52,20 +52,68 @@ MUSIC_FADE_OUT_MS = 2000  # 2 seconds fade out
 # Supported audio formats
 SUPPORTED_FORMATS = ['.mp3', '.wav', '.m4a', '.ogg', '.aac']
 
-# Category → Music keyword mapping
+# 🆕 V4: Category → Music keyword mapping + mood intensity
 CATEGORY_MUSIC_KEYWORDS = {
-    "krishna": ["peaceful", "devotional", "melodic", "flute"],
-    "shiva": ["powerful", "mystical", "cosmic", "meditation"],
-    "hanuman": ["powerful", "energetic", "devotional"],
-    "ganesha": ["auspicious", "festive", "devotional"],
-    "durga": ["powerful", "energetic", "festive"],
-    "ram": ["devotional", "peaceful", "royal"],
-    "spiritual_nature": ["peaceful", "meditation", "ambient"],
-    "motivational": ["energetic", "uplifting", "powerful"],
-    "temple": ["devotional", "peaceful", "sacred"],
-    "daily_wisdom": ["peaceful", "contemplative", "ambient"],
-    "festival": ["festive", "celebration", "joyful"],
-    "festival_moments": ["festive", "celebration", "joyful"],
+    "krishna": {
+        "keywords": ["peaceful", "devotional", "melodic", "flute", "soft"],
+        "mood": "soft",
+        "volume_adjust": -22  # Softer for Krishna (voice dominant)
+    },
+    "shiva": {
+        "keywords": ["powerful", "mystical", "cosmic", "meditation", "deep"],
+        "mood": "intense",
+        "volume_adjust": -18  # Slightly louder for Shiva (dramatic)
+    },
+    "hanuman": {
+        "keywords": ["powerful", "energetic", "devotional", "heroic"],
+        "mood": "energetic",
+        "volume_adjust": -18
+    },
+    "ganesha": {
+        "keywords": ["auspicious", "festive", "devotional", "joyful"],
+        "mood": "joyful",
+        "volume_adjust": -20
+    },
+    "durga": {
+        "keywords": ["powerful", "energetic", "festive", "warrior"],
+        "mood": "intense",
+        "volume_adjust": -18
+    },
+    "ram": {
+        "keywords": ["devotional", "peaceful", "royal", "noble"],
+        "mood": "noble",
+        "volume_adjust": -20
+    },
+    "spiritual_nature": {
+        "keywords": ["peaceful", "meditation", "ambient", "nature"],
+        "mood": "calm",
+        "volume_adjust": -24  # Very soft (meditation feel)
+    },
+    "motivational": {
+        "keywords": ["energetic", "uplifting", "powerful", "triumph"],
+        "mood": "energetic",
+        "volume_adjust": -16  # Louder for motivation
+    },
+    "temple": {
+        "keywords": ["devotional", "peaceful", "sacred", "bells"],
+        "mood": "sacred",
+        "volume_adjust": -22
+    },
+    "daily_wisdom": {
+        "keywords": ["peaceful", "contemplative", "ambient", "soft"],
+        "mood": "calm",
+        "volume_adjust": -24
+    },
+    "festival": {
+        "keywords": ["festive", "celebration", "joyful", "dhol"],
+        "mood": "festive",
+        "volume_adjust": -16  # Louder for festivals
+    },
+    "festival_moments": {
+        "keywords": ["festive", "celebration", "joyful"],
+        "mood": "festive",
+        "volume_adjust": -16
+    },
 }
 
 
@@ -117,8 +165,13 @@ def _select_music_file(category: str = "", mood: str = "") -> Optional[Path]:
 
     logger.info(f"🎵 Found {len(music_files)} music files")
 
-    # Get keywords for category
-    keywords = CATEGORY_MUSIC_KEYWORDS.get(category, [])
+    
+      # 🆕 V4: Get keywords from new dict structure
+    cat_config = CATEGORY_MUSIC_KEYWORDS.get(category, {})
+    if isinstance(cat_config, dict):
+        keywords = cat_config.get("keywords", [])
+    else:
+        keywords = cat_config  # Backward compat if old format
 
     # Also include mood keywords
     if mood:
@@ -236,18 +289,21 @@ def _apply_music_fades(music: AudioSegment) -> AudioSegment:
     return music.fade_in(MUSIC_FADE_IN_MS).fade_out(MUSIC_FADE_OUT_MS)
 
 
-def _lower_music_volume(music: AudioSegment, volume_db: int = MUSIC_VOLUME_DB) -> AudioSegment:
+def _lower_music_volume(music: AudioSegment, volume_db: int = MUSIC_VOLUME_DB, category: str = "") -> AudioSegment:
     """
-    Lower music volume for background use.
-
-    Args:
-        music: AudioSegment
-        volume_db: dB to reduce (negative). -20 dB = ~10% volume
-
-    Returns:
-        Quieter AudioSegment
+    🆕 V4: Dynamic volume based on category.
+    
+    Krishna/meditation = softer music (voice dominant)
+    Motivational/festival = louder music (energy)
     """
-    return music + volume_db  # dB addition (negative reduces volume)
+    # V4: Category-specific volume
+    if category:
+        cat_config = CATEGORY_MUSIC_KEYWORDS.get(category, {})
+        if isinstance(cat_config, dict) and "volume_adjust" in cat_config:
+            volume_db = cat_config["volume_adjust"]
+            logger.info(f"🔊 Dynamic volume for {category}: {volume_db} dB")
+
+    return music + volume_db
 
 
 # ============================================================
@@ -316,8 +372,8 @@ def mix_voice_with_music(
     # Apply fades
     music_audio = _apply_music_fades(music_audio)
 
-    # Lower music volume (make it background)
-    music_audio = _lower_music_volume(music_audio)
+     # 🆕 V4: Dynamic volume based on category
+    music_audio = _lower_music_volume(music_audio, category=category)
     logger.info(f"🔉 Music volume reduced by {abs(MUSIC_VOLUME_DB)} dB")
 
     # Mix voice + music (overlay)

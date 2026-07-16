@@ -80,6 +80,25 @@ ART_STYLES = {
     }
 }
 
+# ============================================================
+# 🆕 V4: CATEGORY-SPECIFIC STYLE ENHANCERS (For Image Agent)
+# ============================================================
+
+CATEGORY_STYLE_ENHANCERS = {
+    "krishna": "divine blue-purple skin glowing softly, rich golden silk dhoti and heavy jewelry, Vrindavan forest with fireflies and lotus ponds, Tanjore painting meets photorealism, sacred golden halo, peacock feather crown with gems, divine flute at lips, warm sunset golden hour lighting, devotional art masterpiece",
+    "shiva": "cosmic deep blue skin with sacred ash marks, matted dreadlocks flowing with Ganga, Himalayan snow peaks with aurora-like cosmic energy, glowing third eye with divine fire, crescent moon on forehead, coiled cobra around neck, trishul with ethereal glow, dark cosmic art style with neon divine light, mystical fog and starfield",
+    "hanuman": "powerful muscular orange-saffron body with divine glow, epic heroic flying pose, golden gada mace with energy aura, Ram naam on chest, wind effects on hair, mountain landscape below, dramatic sky, Rajasthani heroic art meets epic composition",
+    "ganesha": "adorable elephant head with kind wise eyes, ornate golden crown with rubies, sitting on decorated lotus throne with silk cushions, holding modak sweet lovingly, mouse companion nearby, temple with oil lamps and marigold garlands, warm golden sacred light, traditional Indian miniature painting meets photorealism",
+    "durga": "fierce divine mother with ten powerful arms holding sacred weapons, riding majestic lion with flowing mane, red and gold silk saree, intense blazing eyes, battlefield with storm clouds and lightning, divine golden armor and crown, Bengal school art meets epic fantasy",
+    "ram": "noble royal bearing with calm dignified expression, legendary Kodanda bow, blue-green divine skin with royal yellow silk dhoti, ornate golden crown, sacred tilak on forehead, ancient Ayodhya palace or sacred forest, warm sunrise lighting, classical Indian court painting style",
+    "motivational": "lone warrior silhouette on mountain peak against dramatic sunrise, epic wide-angle landscape with light rays through storm clouds, golden hour warm tones with deep shadows, cinematic movie poster composition, Himalayan peaks in background, eagle soaring above",
+    "temple": "ancient stone temple with intricate Dravidian or Nagara architecture, thousands of oil lamps creating warm golden glow, flower garlands and incense smoke, sacred bells and brass decorations, morning aarti scene, National Geographic documentary style photography",
+    "spiritual_nature": "sacred Himalayan landscape at golden hour, ancient banyan tree with sacred threads, sadhu in deep meditation beside flowing river, morning mist over sacred lake, ethereal divine light rays, peaceful contemplative mood",
+    "festival": "vibrant colorful Indian festival celebration, thousands of diyas and rangoli patterns, families in traditional festive clothes, flower decorations and lights everywhere, warm joyful atmosphere, cultural richness",
+    "daily_wisdom": "ancient open scripture on wooden table, soft morning light through window, sacred rudraksha mala, oil lamp burning beside books, warm earth tones, peaceful reading nook in ashram",
+    "default": "spiritual divine atmosphere with sacred golden light, Indian traditional art style meets photorealism, detailed ornate composition, warm devotional colors, cinematic quality, masterpiece artwork"
+}
+
 
 # ============================================================
 # CATEGORY-SPECIFIC ARTISTIC REFERENCES

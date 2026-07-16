@@ -1,17 +1,17 @@
-name: 📸 Auto Image Post (Daily 8 AM IST)
+name: 🤖 Auto Comment Reply (Every 30 min)
 
 on:
   schedule:
-    # Daily 8:00 AM IST (2:30 AM UTC)
-    - cron: '30 2 * * *'
+    # Every 30 minutes (24x7)
+    - cron: '*/30 * * * *'
   
-  # Manual trigger (mobile se run kar sakte ho)
+  # Manual trigger
   workflow_dispatch:
 
 jobs:
-  post-image:
+  reply-comments:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 10  # Quick job — just fetch + reply
     
     steps:
       - name: 📥 Checkout code
@@ -28,13 +28,17 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
       
-      - name: 🔐 Setup Google Cloud credentials
+      - name: 🔐 Setup credentials
         run: |
           echo '${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}' > spiritual-service-account.json
+          if [ ! -z "${{ secrets.YOUTUBE_CLIENT_SECRETS_JSON }}" ]; then
+            echo '${{ secrets.YOUTUBE_CLIENT_SECRETS_JSON }}' > sanatani_youtube_client_secrets.json
+          fi
+          if [ ! -z "${{ secrets.YOUTUBE_TOKEN_JSON }}" ]; then
+            echo '${{ secrets.YOUTUBE_TOKEN_JSON }}' > sanatani_youtube_token.json
+          fi
       
-            # No pre-delay — video builds immediately, delay happens before posting
-      
-      - name: 📸 Run Image Post
+      - name: 🤖 Run Engagement Agent (Auto-Reply)
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           ACCESS_TOKEN: ${{ secrets.ACCESS_TOKEN }}
@@ -45,20 +49,17 @@ jobs:
           BUCKET_NAME: ${{ secrets.BUCKET_NAME }}
           META_APP_ID: ${{ secrets.META_APP_ID }}
           META_APP_SECRET: ${{ secrets.META_APP_SECRET }}
+          YOUTUBE_ENABLED: ${{ secrets.YOUTUBE_CHANNEL_ID != '' && 'true' || 'false' }}
+          YOUTUBE_CHANNEL_ID: ${{ secrets.YOUTUBE_CHANNEL_ID }}
+          YOUTUBE_CLIENT_SECRETS_FILE: sanatani_youtube_client_secrets.json
+          YOUTUBE_TOKEN_FILE: sanatani_youtube_token.json
           GOOGLE_APPLICATION_CREDENTIALS: spiritual-service-account.json
         run: |
-          python main.py image
-      
-      - name: 📊 Upload logs (for debugging)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: image-logs-${{ github.run_id }}
-          path: logs/*.log
-          retention-days: 3
-          if-no-files-found: ignore
+          python main.py engage
       
       - name: 🗑️ Cleanup credentials
         if: always()
         run: |
           rm -f spiritual-service-account.json
+          rm -f sanatani_youtube_client_secrets.json
+          rm -f sanatani_youtube_token.json

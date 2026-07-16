@@ -66,6 +66,7 @@ logger = get_logger("youtube")
 SCOPES = [
     "https://www.googleapis.com/auth/youtube.upload",
     "https://www.googleapis.com/auth/youtube.readonly",
+    "https://www.googleapis.com/auth/youtube.force-ssl",  # 🆕 V3: For reading + posting comments
 ]
 
 # YouTube Data API service
@@ -276,24 +277,266 @@ def _initial_oauth_setup():
 
 
 # ============================================================
-# VIDEO PREPARATION
+# VIDEO PREPARATION (V3 SEO OPTIMIZED)
 # ============================================================
 
-def _prepare_title(title: str, add_shorts_tag: bool = True) -> str:
+def _generate_seo_title(topic: str, category: str = "") -> str:
     """
-    Prepare video title for YouTube Shorts.
+    🆕 V3: Generate SEO-optimized YouTube title.
 
     Rules:
+    - Hindi + English mixed (bilingual SEO)
     - Max 100 characters
-    - Add #Shorts hashtag (required for Shorts detection)
+    - Include category keyword
+    - Include #Shorts
+    - Emotional hook
+
+    Example:
+    "भगवान गणेश की अद्भुत कहानी 🙏 Lord Ganesha Story | सनातनी सोच #Shorts"
     """
-    # Trim to 100 chars (leaving room for #Shorts)
+    # Category → English keywords
+    category_english = {
+        "krishna": "Lord Krishna",
+        "shiva": "Lord Shiva | Mahadev",
+        "hanuman": "Hanuman Ji | Bajrangbali",
+        "ganesha": "Lord Ganesha | Ganpati",
+        "durga": "Maa Durga | Devi",
+        "ram": "Lord Ram | Jai Shri Ram",
+        "motivational": "Motivation",
+        "spiritual_nature": "Spiritual",
+        "temple": "Temple | Mandir",
+        "daily_wisdom": "Daily Wisdom",
+        "festival": "Festival Special",
+        "festival_moments": "Festival Celebration",
+    }
+
+    # Category → Hindi keywords
+    category_hindi = {
+        "krishna": "श्री कृष्ण",
+        "shiva": "महादेव",
+        "hanuman": "हनुमान जी",
+        "ganesha": "गणेश जी",
+        "durga": "मां दुर्गा",
+        "ram": "श्री राम",
+        "motivational": "प्रेरणा",
+        "spiritual_nature": "आध्यात्मिक",
+        "temple": "मंदिर",
+        "daily_wisdom": "ज्ञान",
+    }
+
+    # Category → Emoji
+    category_emoji = {
+        "krishna": "🦚",
+        "shiva": "🕉️",
+        "hanuman": "🚩",
+        "ganesha": "🐘",
+        "durga": "🌺",
+        "ram": "🏹",
+        "motivational": "💪",
+        "spiritual_nature": "🙏",
+        "temple": "🛕",
+    }
+
+    hindi_word = category_hindi.get(category, "भक्ति")
+    english_word = category_english.get(category, "Spiritual")
+    emoji = category_emoji.get(category, "🙏")
+
+    # Clean topic (remove English, keep short)
+    import re
+    # Extract meaningful Hindi words from topic
+    hindi_chars = ''.join(c for c in topic if '\u0900' <= c <= '\u097F' or c == ' ')
+    hindi_chars = hindi_chars.strip()
+
+    if hindi_chars and len(hindi_chars) > 5:
+        hook = hindi_chars[:40]
+    else:
+        hook = f"{hindi_word} की अद्भुत कहानी"
+
+    # Build title: "Hindi Hook 🙏 English | Brand #Shorts"
+    title = f"{hook} {emoji} {english_word} | सनातनी सोच #Shorts"
+
+    # Trim to 100 chars
+    if len(title) > 100:
+        # Shorten hook
+        max_hook = 100 - len(f" {emoji} {english_word} | सनातनी सोच #Shorts") - 3
+        if max_hook > 10:
+            hook = hook[:max_hook] + "..."
+            title = f"{hook} {emoji} {english_word} | सनातनी सोच #Shorts"
+        else:
+            title = f"{hindi_word} {emoji} {english_word} #Shorts"
+
+    return title
+
+
+def _generate_seo_description(
+    topic: str,
+    caption: str = "",
+    category: str = "",
+    hashtags: str = ""
+) -> str:
+    """
+    🆕 V3: Generate SEO-optimized YouTube description.
+
+    Structure:
+    1. Hindi hook (2-3 lines)
+    2. English SEO paragraph (3-4 lines)
+    3. Keywords section
+    4. Channel CTA
+    5. Hashtags
+    """
+
+    # Category → English SEO paragraphs
+    category_seo = {
+        "krishna": "Watch this beautiful story about Lord Krishna. Learn about Hindu mythology, Bhagavad Gita, and the divine teachings of Shri Krishna. Perfect for spiritual seekers and devotees.",
+        "shiva": "Discover the powerful story of Lord Shiva (Mahadev). Learn about Hindu mythology, Kailash, and the cosmic power of Shiva. Om Namah Shivaya.",
+        "hanuman": "Watch this inspiring story of Hanuman Ji (Bajrangbali). Learn about devotion, courage, and the power of Ram Bhakti. Jai Hanuman!",
+        "ganesha": "Beautiful story of Lord Ganesha (Ganpati Bappa). Learn about wisdom, obstacle removal, and the blessings of Vighnaharta. Ganpati Bappa Morya!",
+        "durga": "Powerful story of Maa Durga. Learn about divine feminine power, Shakti, and the protection of the Divine Mother. Jai Mata Di!",
+        "ram": "Inspiring story of Lord Ram. Learn about Dharma, righteousness, and the ideal life of Maryada Purushottam. Jai Shri Ram!",
+        "motivational": "Get inspired with this powerful spiritual motivation. Daily wisdom for a better life. Stay positive, stay blessed.",
+        "spiritual_nature": "Connect with your spiritual self through this beautiful content. Meditation, peace, and inner wisdom.",
+        "temple": "Explore the divine beauty of ancient Indian temples. Sacred architecture and spiritual heritage.",
+    }
+
+    english_seo = category_seo.get(category, 
+        "Watch this beautiful spiritual content from Indian mythology. Daily devotional stories and wisdom for a blessed life."
+    )
+
+    # Build description
+    parts = []
+
+    # Part 1: Hindi caption (first 300 chars)
+    if caption:
+        hindi_caption = caption[:300]
+        if len(caption) > 300:
+            hindi_caption += "..."
+        parts.append(hindi_caption)
+    else:
+        parts.append(f"🙏 {topic}")
+
+    parts.append("")  # Empty line
+
+    # Part 2: English SEO paragraph
+    parts.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    parts.append(f"📖 {english_seo}")
+    parts.append("")
+
+    # Part 3: Channel CTA
+    parts.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    parts.append("🔔 Subscribe to सनातनी सोच for daily spiritual content!")
+    parts.append("👍 Like, Comment & Share this video")
+    parts.append("📸 Follow on Instagram: @sanatanii_soch")
+    parts.append("📘 Follow on Facebook: सनातन सोच")
+    parts.append("")
+
+    # Part 4: SEO Keywords (hidden but indexed)
+    parts.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    parts.append("Keywords: Hindu mythology, Sanatan Dharma, Indian spiritual stories, "
+                 "devotional content, bhakti, Hindu gods, divine stories, "
+                 "spiritual motivation, daily wisdom, Indian culture")
+    parts.append("")
+
+    # Part 5: Hashtags
+    if hashtags:
+        parts.append(hashtags)
+    parts.append("#Shorts #SanatanDharma #Spiritual #Hindu #Devotional #SanataniSoch")
+
+    return "\n".join(parts)
+
+
+def _generate_seo_tags(category: str = "", hashtags: str = "") -> list:
+    """
+    🆕 V3: Generate YouTube-optimized tags.
+
+    YouTube allows max 500 characters total in tags.
+    Mix of Hindi + English for maximum reach.
+    """
+    # Base tags (always include)
+    base_tags = [
+        "Sanatan Dharma", "Hindu", "Spiritual", "Devotional",
+        "Indian Mythology", "Hindi Story", "Shorts",
+        "सनातन धर्म", "भक्ति", "आध्यात्मिक",
+        "Sanatani Soch", "सनातनी सोच",
+    ]
+
+    # Category-specific tags
+    category_tags = {
+        "krishna": [
+            "Krishna", "Lord Krishna", "Bhagavad Gita", "Vrindavan",
+            "Radha Krishna", "श्री कृष्ण", "कृष्ण लीला", "गीता",
+            "Hare Krishna", "Flute", "Govind", "Murli Manohar"
+        ],
+        "shiva": [
+            "Shiva", "Mahadev", "Lord Shiva", "Kailash",
+            "Om Namah Shivaya", "महादेव", "शिव", "भोलेनाथ",
+            "Har Har Mahadev", "Trishul", "Tandav", "Neelkanth"
+        ],
+        "hanuman": [
+            "Hanuman", "Bajrangbali", "Jai Hanuman", "Ram Bhakt",
+            "हनुमान", "बजरंगबली", "पवन पुत्र", "संकट मोचन",
+            "Hanuman Chalisa", "Lanka", "Sanjeevani"
+        ],
+        "ganesha": [
+            "Ganesha", "Ganpati", "Lord Ganesha", "Ganpati Bappa",
+            "गणेश", "गणपति", "विघ्नहर्ता", "मोदक",
+            "Ganesh Chaturthi", "Morya", "Elephant God"
+        ],
+        "durga": [
+            "Durga", "Maa Durga", "Goddess Durga", "Navratri",
+            "दुर्गा", "मां दुर्गा", "शक्ति", "नवरात्रि",
+            "Jai Mata Di", "Sherawali", "Mahishasur"
+        ],
+        "ram": [
+            "Ram", "Lord Ram", "Jai Shri Ram", "Ayodhya",
+            "श्री राम", "राम", "अयोध्या", "सीता राम",
+            "Ramayana", "Sita", "Lakshman", "Hanuman"
+        ],
+        "motivational": [
+            "Motivation", "Inspiration", "Life Lessons",
+            "प्रेरणा", "जीवन", "सफलता",
+            "Daily Motivation", "Positive Vibes", "Success"
+        ],
+    }
+
+    # Combine tags
+    all_tags = list(base_tags)
+
+    # Add category-specific
+    cat_tags = category_tags.get(category, [])
+    all_tags.extend(cat_tags)
+
+    # Add from hashtags (convert # to tag)
+    if hashtags:
+        for tag in hashtags.split():
+            clean_tag = tag.lstrip('#').strip()
+            if clean_tag and len(clean_tag) >= 2 and clean_tag not in all_tags:
+                all_tags.append(clean_tag)
+
+    # Deduplicate (case-insensitive)
+    seen = set()
+    unique_tags = []
+    total_chars = 0
+
+    for tag in all_tags:
+        tag_lower = tag.lower()
+        if tag_lower not in seen:
+            # Check total character limit (500)
+            if total_chars + len(tag) + 2 > 480:
+                break
+            seen.add(tag_lower)
+            unique_tags.append(tag)
+            total_chars += len(tag) + 2
+
+    return unique_tags
+
+
+def _prepare_title(title: str, add_shorts_tag: bool = True) -> str:
+    """Prepare video title for YouTube Shorts"""
     max_len = 90 if add_shorts_tag else 100
 
     if len(title) > max_len:
         title = title[:max_len].strip() + "..."
 
-    # Add #Shorts if not present
     if add_shorts_tag and "#shorts" not in title.lower():
         title = f"{title} {SHORTS_HASHTAG}"
 
@@ -305,33 +548,22 @@ def _prepare_description(
     hashtags: str = "",
     add_shorts_tag: bool = True
 ) -> str:
-    """
-    Prepare video description.
-
-    Rules:
-    - Max 5000 characters
-    - Include #Shorts (required)
-    - Include hashtags
-    """
+    """Prepare video description"""
     parts = []
 
     if description:
         parts.append(description)
 
-    # Add separator
     if hashtags or add_shorts_tag:
-        parts.append("")  # Empty line
+        parts.append("")
 
-    # Add hashtags
     if hashtags:
         parts.append(hashtags)
 
-    # Ensure #Shorts is somewhere
     combined = "\n".join(parts)
     if add_shorts_tag and "#shorts" not in combined.lower():
         combined += f"\n\n{SHORTS_HASHTAG}"
 
-    # Trim to 5000 chars
     if len(combined) > 5000:
         combined = combined[:4990].strip() + "..."
 
@@ -339,22 +571,16 @@ def _prepare_description(
 
 
 def _extract_tags_from_hashtags(hashtags: str, max_tags: int = 15) -> list:
-    """
-    Convert hashtag string to tags list.
-
-    YouTube allows max 500 chars total in tags.
-    """
+    """Convert hashtag string to tags list"""
     if not hashtags:
         return []
 
-    # Extract hashtag words (remove #, split by space)
     words = []
     for tag in hashtags.split():
         clean = tag.lstrip('#').strip()
         if clean and len(clean) >= 2:
             words.append(clean)
 
-    # Limit and dedupe
     seen = set()
     result = []
     total_chars = 0
@@ -362,8 +588,7 @@ def _extract_tags_from_hashtags(hashtags: str, max_tags: int = 15) -> list:
     for word in words[:max_tags]:
         word_lower = word.lower()
         if word_lower not in seen:
-            # Check total length limit
-            if total_chars + len(word) + 2 > 480:  # Safety margin
+            if total_chars + len(word) + 2 > 480:
                 break
             seen.add(word_lower)
             result.append(word)

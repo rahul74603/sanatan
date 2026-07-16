@@ -340,14 +340,17 @@ def apply_all_effects(
     if add_transitions and len(result) >= 2:
         result = apply_crossfade(result, transition_duration)
 
-    # Step 2: Fade in on first clip
-    if add_fade_in_out and result:
-        result[0] = apply_fade_in(result[0], fade_in_duration)
+       # Step 2: Fade in on first clip
+    # 🆕 V3 FIX: NO fade-in on first clip (causes black thumbnail!)
+    # Instagram/FB/YT use first frame as thumbnail
+    # Fade-in = black first frame = black thumbnail
+    # Instead: Start directly with Scene 1 image
+    # if add_fade_in_out and result:
+    #     result[0] = apply_fade_in(result[0], fade_in_duration)
 
-    # Step 3: Fade out on last clip
+    # Step 3: Fade out on last clip (keep this — end fade is OK)
     if add_fade_in_out and result:
         result[-1] = apply_fade_out(result[-1], fade_out_duration)
-
     logger.info(f"✅ Effects pipeline complete ({len(result)} clips)")
 
     return result

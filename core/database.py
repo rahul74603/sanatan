@@ -617,6 +617,147 @@ def display_schedule():
 
 
 # ============================================================
+# 🆕 V4: AUTO-LEARN BEST POSTING TIME
+# ============================================================
+
+def get_best_posting_times(min_posts: int = 5) -> dict:
+    """
+    🆕 V4: Analyze engagement data to find best posting times.
+
+    Returns:
+        {
+            "best_hour": 8,
+            "best_slot": "morning",
+            "hourly_engagement": {8: 150, 13: 120, 20: 200},
+            "recommendation": "8 PM gets 2x more engagement than 1 PM",
+            "data_points": 25,
+            "confidence": "high"  # high if 20+ posts, medium if 10+, low if <10
+        }
+    """
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+
+        # Get engagement per posting hour
+        cursor.execute("""
+            SELECT 
+                CAST(strftime('%H', post_date) AS INTEGER) as hour,
+                COUNT(*) as post_count,
+                AVG(CASE WHEN ig_success = 1 THEN 1 ELSE 0 END) as success_rate
+            FROM post_history
+            WHERE post_date IS NOT NULL
+            GROUP BY hour
+            HAVING post_count >= ?
+            ORDER BY success_rate DESC
+        """, (min_posts,))
+
+        rows = cursor.fetchall()
+        conn.close()
+
+        if not rows:
+            return {
+                "best_hour": 8,
+                "best_slot": "morning",
+                "hourly_engagement": {},
+                "recommendation": "Not enough data yet. Need 5+ posts per time slot.",
+                "data_points": 0,
+                "confidence": "low"
+            }
+
+        # Build hourly map
+        hourly = {}
+        total_posts = 0
+        for hour, count, rate in rows:
+            hourly[hour] = {
+                "posts": count,
+                "success_rate": round(rate * 100, 1)
+            }
+            total_posts += count
+
+        # Find best hour
+        best_row = rows[0]
+        best_hour = best_row[0]
+
+        # Determine slot name
+        if 5 <= best_hour < 11:
+            best_slot = "morning"
+        elif 11 <= best_hour < 16:
+            best_slot = "afternoon"
+        elif 16 <= best_hour < 21:
+            best_slot = "evening"
+        else:
+            best_slot = "night"
+
+        # Confidence
+        if total_posts >= 20:
+            confidence = "high"
+        elif total_posts >= 10:
+            confidence = "medium"
+        else:
+            confidence = "low"
+
+        # Recommendation
+        if len(rows) >= 2:
+            best = rows[0]
+            worst = rows[-1]
+            recommendation = (
+                f"{best[0]}:00 has {best[2]*100:.0f}% success rate "
+                f"(best). {worst[0]}:00 has {worst[2]*100:.0f}% (worst). "
+                f"Post more at {best[0]}:00!"
+            )
+        else:
+            recommendation = f"Best time: {best_hour}:00 ({best_slot})"
+
+        result = {
+            "best_hour": best_hour,
+            "best_slot": best_slot,
+            "hourly_engagement": hourly,
+            "recommendation": recommendation,
+            "data_points": total_posts,
+            "confidence": confidence
+        }
+
+        logger.info(f"📊 Best posting time: {best_hour}:00 ({best_slot}) — {confidence} confidence")
+
+        return result
+
+    except Exception as e:
+        logger.warning(f"⚠️  Posting time analysis failed: {e}")
+        return {
+            "best_hour": 8,
+            "best_slot": "morning",
+            "hourly_engagement": {},
+            "recommendation": f"Analysis failed: {e}",
+            "data_points": 0,
+            "confidence": "low"
+        }
+
+
+def display_posting_insights():
+    """🆕 V4: Display posting time insights"""
+    result = get_best_posting_times()
+
+    logger.info("")
+    logger.info("╔══════════════════════════════════════════════╗")
+    logger.info("║       📊 POSTING TIME INSIGHTS               ║")
+    logger.info("╠══════════════════════════════════════════════╣")
+    logger.info(f"║ Best hour    : {result['best_hour']}:00 ({result['best_slot']})")
+    logger.info(f"║ Confidence   : {result['confidence']}")
+    logger.info(f"║ Data points  : {result['data_points']} posts analyzed")
+    logger.info("╠══════════════════════════════════════════════╣")
+    logger.info(f"║ 💡 {result['recommendation']}")
+    logger.info("╠══════════════════════════════════════════════╣")
+
+    if result['hourly_engagement']:
+        logger.info("║ Per-hour breakdown:")
+        for hour, data in sorted(result['hourly_engagement'].items()):
+            bar = "█" * int(data['success_rate'] / 10)
+            logger.info(f"║   {hour:02d}:00 → {bar} {data['success_rate']}% ({data['posts']} posts)")
+
+    logger.info("╚══════════════════════════════════════════════╝")
+
+
+# ============================================================
 # STANDALONE TESTING
 # ============================================================
 

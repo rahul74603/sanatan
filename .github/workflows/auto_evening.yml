@@ -55,11 +55,7 @@ jobs:
             echo '${{ secrets.YOUTUBE_TOKEN_JSON }}' > sanatani_youtube_token.json
           fi
       
-      - name: ⏰ Random delay (0-30 min for natural posting)
-        run: |
-          DELAY=$((RANDOM % 1800))
-          echo "Waiting $DELAY seconds..."
-          sleep $DELAY
+            # No pre-delay — video builds immediately, delay happens before posting
       
       - name: 🌙 Run Smart Evening Post (Auto-detects Reel or Carousel)
         env:

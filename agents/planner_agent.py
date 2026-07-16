@@ -238,14 +238,26 @@ def _select_topic_with_strategy(strategy: dict, recent_topics: list, recent_cate
                 "selection_reason": f"weekday_deity_{strategy['weekday']}"
             }
 
-    # Fallback: Use smart topic selection (time + season based)
+       # Fallback: Use smart topic selection (time + season based)
     smart = get_smart_topic(exclude_topics=recent_topics)
 
-    # If selected category was recently used, try alternative
-    if smart["category"] in recent_categories[:MIN_CATEGORY_GAP]:
-        logger.info(f"Category {smart['category']} recent - trying alternative")
-        # Try once more
+    # 🆕 V4: Stronger duplicate prevention — try up to 5 times for variety
+    max_variety_attempts = 5
+    for variety_attempt in range(max_variety_attempts):
+        if smart["category"] not in recent_categories[:MIN_CATEGORY_GAP]:
+            break  # Good — different category
+
+        logger.info(
+            f"🔄 Category '{smart['category']}' recently used "
+            f"(attempt {variety_attempt + 1}/{max_variety_attempts})"
+        )
         smart = get_smart_topic(exclude_topics=recent_topics)
+
+    # 🆕 V4: Log final diversity status
+    if smart["category"] in recent_categories[:2]:
+        logger.warning(f"⚠️  Could not avoid repeat category: {smart['category']}")
+    else:
+        logger.info(f"✅ Category variety maintained: {smart['category']}")
 
     return smart
 
@@ -293,14 +305,65 @@ def run(memory: AgentMemory) -> AgentMemory:
     strategy = _calculate_content_priority()
     _log_strategy(strategy)
 
-    # ========== STEP 2: FETCH HISTORY ==========
-    recent_topics = get_recent_topics(limit=20)
-    recent_categories = _get_recent_categories(limit=5)
+        # ========== STEP 2: FETCH HISTORY ==========
+    recent_topics = get_recent_topics(limit=30)  # 🆕 V4: Check more history
+    recent_categories = _get_recent_categories(limit=7)  # 🆕 V4: Check more categories
 
     logger.info(f"📚 Recent topics to avoid: {len(recent_topics)}")
-    logger.info(f"📁 Recent categories: {recent_categories[:3]}")
+    logger.info(f"📁 Recent categories: {recent_categories[:5]}")
 
-    # ========== STEP 3: SELECT TOPIC ==========
+    # 🆕 V4: Category balance check
+    if recent_categories:
+        from collections import Counter
+        cat_counts = Counter(recent_categories[:7])
+        most_common = cat_counts.most_common(1)[0] if cat_counts else ("none", 0)
+
+        if most_common[1] >= 3:
+            logger.warning(
+                f"⚠️  Category imbalance: '{most_common[0]}' used {most_common[1]} times in last 7 posts!"
+            )
+            logger.info(f"   🔄 Will try to pick different category for variety")
+
+        # ========== 🆕 V3: CHECK TRENDING NICHE TOPICS ==========
+    trending_override = None
+    try:
+        from trending.niche_detector import get_trending_override
+        trending_override = get_trending_override()
+
+        if trending_override and trending_override.get("should_override"):
+            logger.info(f"🔥 TRENDING OVERRIDE: {trending_override['topic']}")
+            selected = {
+                "topic": trending_override["topic"],
+                "category": trending_override["category"],
+                "is_festival": True,
+                "festival_name": trending_override["topic"],
+                "selection_reason": f"trending_{trending_override['source']}"
+            }
+            # Skip normal selection — go directly to Step 4
+            memory.topic = selected["topic"]
+            memory.category = selected["category"]
+            memory.is_festival = selected.get("is_festival", False)
+            memory.festival_name = selected.get("festival_name", "")
+            memory.analytics_data["strategy"] = strategy
+            memory.analytics_data["selection_reason"] = selected["selection_reason"]
+            mark_content_used("topic", memory.topic)
+
+            logger.info("┌─────────────────────────────────────────────┐")
+            logger.info("│        🔥 TRENDING TOPIC SELECTED            │")
+            logger.info("├─────────────────────────────────────────────┤")
+            logger.info(f"│ 📌 Topic    : {memory.topic[:50]}")
+            logger.info(f"│ 📂 Category : {memory.category}")
+            logger.info(f"│ 🔥 Reason   : {trending_override['reason'][:50]}")
+            logger.info("└─────────────────────────────────────────────┘")
+            logger.info("=== PLANNER AGENT DONE ===")
+            return memory
+
+    except ImportError:
+        pass  # trending module not installed yet
+    except Exception as e:
+        logger.warning(f"⚠️  Trending check failed (using normal): {e}")
+
+    # ========== STEP 3: SELECT TOPIC (Normal) ==========
     logger.info("🎯 Selecting optimal topic...")
 
     selected = _select_topic_with_strategy(

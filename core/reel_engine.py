@@ -44,8 +44,8 @@ Recovery Support:
 - Reuses saved images/voice/subtitles
 - 24 hour auto-cleanup
 """
-import time
 import os
+import time
 from typing import Optional
 from pathlib import Path
 
@@ -658,6 +658,175 @@ def _run_stage_video_watermark(memory: AgentMemory) -> AgentMemory:
 
 # ============================================================
 # POST-BUILD VALIDATION
+# ============================================================# ============================================================
+# 🆕 V3: THUMBNAIL GENERATION
+# ============================================================
+
+def _run_stage_thumbnail(memory: AgentMemory) -> AgentMemory:
+    """
+    🆕 V3: Generate thumbnail from Scene 1 image.
+
+    Why:
+    - IG/FB/YT use first video frame as thumbnail
+    - Our videos start with fade-in = BLACK frame
+    - Black thumbnail = nobody clicks
+    - Solution: Use Scene 1 image as cover/thumbnail
+
+    For YouTube: Upload custom thumbnail via API
+    For IG/FB: First frame of video = thumbnail (already fixed by removing fade-in)
+    """
+    start = time.time()
+    logger.info("")
+    logger.info(f"━━━ 🖼️  Thumbnail Generate करना ━━━")
+
+    try:
+        # Get Scene 1 image (best for thumbnail)
+        if not memory.reel_scenes:
+            logger.warning("⚠️  No scenes, skipping thumbnail")
+            return memory
+
+        scene_1 = memory.reel_scenes[0]
+        scene_1_bytes = scene_1.get("image_bytes")
+
+        if not scene_1_bytes:
+            # Try scene 2 or 3
+            for scene in memory.reel_scenes[1:]:
+                if scene.get("image_bytes"):
+                    scene_1_bytes = scene["image_bytes"]
+                    break
+
+        if not scene_1_bytes:
+            logger.warning("⚠️  No scene images for thumbnail")
+            return memory
+
+        # Create thumbnail with text overlay
+        from PIL import Image, ImageDraw, ImageFont
+        from io import BytesIO
+
+        # Load scene image
+        img = Image.open(BytesIO(scene_1_bytes))
+
+        # Ensure RGB
+        if img.mode != 'RGB':
+            if img.mode == 'RGBA':
+                bg = Image.new('RGB', img.size, (0, 0, 0))
+                bg.paste(img, mask=img.split()[3])
+                img = bg
+            else:
+                img = img.convert('RGB')
+
+        # Resize to exact 1080x1920 (9:16)
+        img = img.resize((1080, 1920), Image.LANCZOS)
+
+        # Add hook text overlay (top area)
+        draw = ImageDraw.Draw(img)
+
+        # Load Hindi font
+        font_path = None
+        font_paths = [
+            "fonts/NotoSansDevanagari-Bold.ttf",
+            "C:/Windows/Fonts/NirmalaB.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Bold.ttf",
+        ]
+        for fp in font_paths:
+            if os.path.exists(fp):
+                font_path = fp
+                break
+
+        if font_path:
+            try:
+                font_large = ImageFont.truetype(font_path, 72)
+                font_small = ImageFont.truetype(font_path, 36)
+            except Exception:
+                font_large = ImageFont.load_default()
+                font_small = ImageFont.load_default()
+        else:
+            font_large = ImageFont.load_default()
+            font_small = ImageFont.load_default()
+
+        # Get hook text from scene 1 narration
+        hook_text = scene_1.get("narration", memory.topic)
+
+        # Truncate to first sentence or 30 chars
+        if '।' in hook_text:
+            hook_text = hook_text.split('।')[0] + '?'
+        elif '?' in hook_text:
+            hook_text = hook_text.split('?')[0] + '?'
+        elif len(hook_text) > 40:
+            hook_text = hook_text[:40] + '...'
+
+        # Draw semi-transparent gradient at top
+        gradient_height = 400
+        for i in range(gradient_height):
+            alpha = int(180 * (1 - i / gradient_height))
+            y = i
+            draw.rectangle(
+                [(0, y), (1080, y + 1)],
+                fill=(0, 0, 0, alpha) if img.mode == 'RGBA' else (0, 0, 0)
+            )
+
+        # Draw text at top
+        # Wrap text manually
+        import textwrap
+        wrapped = textwrap.fill(hook_text, width=15)
+        lines = wrapped.split('\n')[:3]  # Max 3 lines
+
+        y_pos = 80
+        for line in lines:
+            # Shadow
+            draw.text((42, y_pos + 2), line, font=font_large, fill=(0, 0, 0))
+            # Main text (gold)
+            draw.text((40, y_pos), line, font=font_large, fill=(255, 215, 0))
+            y_pos += 85
+
+        # Draw brand name at bottom
+        brand_text = "@sanatanii_soch"
+        draw.text((40, 1820), brand_text, font=font_small, fill=(255, 255, 255))
+
+        # Save thumbnail
+        thumb_buf = BytesIO()
+        img.save(thumb_buf, format='JPEG', quality=90)
+        thumb_bytes = thumb_buf.getvalue()
+
+        # Save to memory
+        memory.reel_thumbnail_url = ""  # Will be set after upload
+
+        # Save thumbnail file locally
+        thumb_dir = Path("logs/thumbnails")
+        thumb_dir.mkdir(parents=True, exist_ok=True)
+        thumb_path = thumb_dir / f"thumb_{memory.session_id}.jpg"
+
+        with open(thumb_path, 'wb') as f:
+            f.write(thumb_bytes)
+
+        logger.info(f"✅ Thumbnail generated: {len(thumb_bytes):,} bytes")
+        logger.info(f"   📁 Path: {thumb_path}")
+        logger.info(f"   📝 Hook: {hook_text[:50]}")
+
+        # Upload thumbnail to GCS
+        try:
+            from utils.gcs_helper import upload_image
+            thumb_url = upload_image(
+                thumb_bytes,
+                folder="thumbnails",
+                metadata={"session_id": memory.session_id}
+            )
+            memory.reel_thumbnail_url = thumb_url
+            logger.info(f"   ☁️  Uploaded: {thumb_url[:60]}...")
+        except Exception as e:
+            logger.warning(f"   ⚠️  Thumbnail upload failed: {e}")
+
+    except Exception as e:
+        logger.warning(f"⚠️  Thumbnail generation failed (non-critical): {e}")
+
+    elapsed = round(time.time() - start, 2)
+    logger.info(f"✅ Thumbnail done ({elapsed}s)")
+
+    return memory
+
+
+# ============================================================
+# POST-BUILD VALIDATION
 # ============================================================
 
 def _validate_final_reel(memory: AgentMemory) -> dict:
@@ -915,9 +1084,12 @@ def build_reel(
         memory = _run_stage_subtitles(memory)
 
         # VIDEO LAYER (Stages 9-10)
+                # STAGES 9-10: VIDEO LAYER
         memory = _run_stage_video_builder(memory)
         memory = _run_stage_video_watermark(memory)
 
+        # 🆕 V3: GENERATE THUMBNAIL FROM SCENE 1
+        memory = _run_stage_thumbnail(memory)
         # ═══════════════════════════════════════════
         # POST-BUILD VALIDATION
         # ═══════════════════════════════════════════

@@ -922,18 +922,25 @@ def post_reel_to_instagram(video_url: str, caption: str, memory: Optional[AgentM
         try:
             logger.info(f"📦 IG Reel container बना रहे हैं (कोशिश {attempt}/{MAX_RETRIES})")
 
+                        # 🆕 V4: Add cover image (thumbnail) for better grid appearance
+            post_data = {
+                'media_type':    'REELS',
+                'video_url':     video_url,
+                'caption':       caption,
+                'share_to_feed': 'true',
+                'access_token':  ACCESS_TOKEN
+            }
+
+            # Add thumbnail as cover (fixes black thumbnail on IG grid)
+            if memory and hasattr(memory, 'reel_thumbnail_url') and memory.reel_thumbnail_url:
+                post_data['cover_url'] = memory.reel_thumbnail_url
+                logger.info(f"   🖼️  Cover image set: {memory.reel_thumbnail_url[:50]}...")
+
             response = requests.post(
                 url,
-                data={
-                    'media_type':    'REELS',
-                    'video_url':     video_url,
-                    'caption':       caption,
-                    'share_to_feed': 'true',  # Also show in main feed
-                    'access_token':  ACCESS_TOKEN
-                },
+                data=post_data,
                 timeout=REQUEST_TIMEOUT
             )
-
             if response.status_code == 200:
                 creation_id = response.json().get('id')
                 if creation_id:
@@ -1010,6 +1017,41 @@ def post_reel_to_instagram(video_url: str, caption: str, memory: Optional[AgentM
 # 🆕 V2: REEL — FACEBOOK
 # ============================================================
 
+def _prepare_fb_reel_description(caption: str, memory: Optional[AgentMemory] = None) -> str:
+    """
+    🆕 V4: Enhanced Facebook description (FB allows longer text than IG).
+    """
+    parts = [caption]
+
+    if memory:
+        if memory.topic:
+            parts.append("")
+            parts.append(f"📌 विषय: {memory.topic}")
+
+        category_context = {
+            "krishna": "🦚 श्री कृष्ण की कहानी — प्यार, भक्ति और ज्ञान से भरी।",
+            "shiva": "🕉️ भगवान शिव की कहानी — ताकत और शांति का संगम।",
+            "hanuman": "🚩 हनुमान जी की कहानी — हिम्मत और भक्ति की मिसाल।",
+            "ganesha": "🐘 गणेश जी की कहानी — मुसीबतें दूर करने वाले बाप्पा।",
+            "durga": "🌺 मां दुर्गा की कहानी — शक्ति और प्यार का रूप।",
+            "ram": "🏹 श्री राम की कहानी — धर्म और सच्चाई का रास्ता।",
+        }
+
+        if memory.category in category_context:
+            parts.append("")
+            parts.append(category_context[memory.category])
+
+    parts.append("")
+    parts.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    parts.append("👍 पसंद आया तो Like करें")
+    parts.append("💬 अपनी बात Comment में बताएं")
+    parts.append("🔄 अपने दोस्तों को Share करें")
+    parts.append("📸 Instagram: @sanatanii_soch")
+    parts.append("🔔 Page Follow करें: सनातन सोच")
+
+    return "\n".join(parts)
+
+
 def post_reel_to_facebook(video_url: str, caption: str, memory: Optional[AgentMemory] = None) -> dict:
     """
     🆕 V2: Post Reel to Facebook.
@@ -1073,7 +1115,7 @@ def post_reel_to_facebook(video_url: str, caption: str, memory: Optional[AgentMe
                                 'video_id': video_id,
                                 'upload_phase': 'finish',
                                 'video_state': 'PUBLISHED',
-                                'description': caption
+                             'description': _prepare_fb_reel_description(caption, memory)
                             },
                             timeout=REQUEST_TIMEOUT
                         )
@@ -1322,9 +1364,31 @@ def run(memory: AgentMemory) -> AgentMemory:
 
                 _human_like_delay(30, 60, "YouTube से पहले wait")
 
-                # Prepare YouTube-specific fields
-                yt_title = memory.topic[:90] if memory.topic else "Spiritual Content"
-                yt_description = memory.caption or ""
+             # 🆕 V3: SEO-optimized YouTube upload
+                try:
+                    from posting.youtube import (
+                        _generate_seo_title,
+                        _generate_seo_description,
+                        _generate_seo_tags
+                    )
+
+                    yt_title = _generate_seo_title(
+                        topic=memory.topic,
+                        category=memory.category
+                    )
+                    yt_description = _generate_seo_description(
+                        topic=memory.topic,
+                        caption=memory.caption or "",
+                        category=memory.category,
+                        hashtags=memory.hashtags or ""
+                    )
+
+                    logger.info(f"🎯 YT SEO Title: {yt_title[:60]}...")
+
+                except ImportError:
+                    # Fallback if SEO functions not available
+                    yt_title = memory.topic[:90] if memory.topic else "Spiritual Content"
+                    yt_description = memory.caption or ""
 
                 yt_result = post_reel_to_youtube(
                     video_bytes=memory.reel_video_bytes,
