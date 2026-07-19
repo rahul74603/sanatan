@@ -225,7 +225,7 @@ def adjust_scene_durations(scenes: list, voice_duration: float) -> list:
     logger.info(f"   Scenes: {len(scenes)}")
 
     # Add 0.5s buffer at end for smooth ending
-    target_duration = voice_duration + 0.5
+    target_duration = voice_duration + 1.5
 
     # Get total weight from SCENE_ARC (matching by scene_number)
     total_weight = 0
