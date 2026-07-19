@@ -386,10 +386,10 @@ def mix_voice_with_music(
 
     Voice dominant, music at ~10% volume in background.
     
-    V3 FIXES:
+    V3.1 FIXES:
     - Trust pydub for real voice duration (no more override bug)
     - Removed complex "hint vs pydub" logic
-    - Simpler flow, more reliable
+    - Added 500ms silence padding (fixes MoviePy edge glitch)
     - Perfect video-audio sync
 
     Args:
@@ -404,7 +404,7 @@ def mix_voice_with_music(
     If music disabled or unavailable, returns voice as-is.
     """
     logger.info("=" * 55)
-    logger.info("=== MUSIC MANAGER V3 - MIX (Trust Pydub) ===")
+    logger.info("=== MUSIC MANAGER V3.1 - MIX (Trust Pydub + Padding) ===")
     logger.info("=" * 55)
     logger.info(f"📥 Voice bytes: {len(voice_bytes):,}")
     logger.info(f"📥 TTS hint: {voice_duration:.1f}s (for comparison)")
@@ -427,14 +427,23 @@ def mix_voice_with_music(
         hint=voice_duration
     )
     
-    logger.info(f"✅ Final voice duration: {voice_duration_ms/1000:.1f}s")
+    logger.info(f"✅ Real voice duration: {voice_duration_ms/1000:.1f}s")
+
+    # 🆕 V3.1 FIX: Add 500ms silence padding at end
+    # Fixes MoviePy edge-case glitch (audio buffer runs out at exact end)
+    padding_ms = 500
+    silence_padding = AudioSegment.silent(duration=padding_ms)
+    voice_audio = voice_audio + silence_padding
+    voice_duration_ms = len(voice_audio)
+    logger.info(f"🔧 Added {padding_ms}ms silence padding (MoviePy fix)")
+    logger.info(f"✅ Padded voice duration: {voice_duration_ms/1000:.1f}s")
 
     # Select music file
     music_file = _select_music_file(category=category, mood=mood)
 
     if music_file is None:
         logger.warning("⚠️  No music available - returning voice only")
-        # Export voice as-is
+        # Export voice as-is (with padding)
         try:
             buf = io.BytesIO()
             voice_audio.export(buf, format="mp3", bitrate="128k")
@@ -449,7 +458,7 @@ def mix_voice_with_music(
         logger.warning("⚠️  Failed to load music - returning voice only")
         return voice_bytes, ""
 
-    # Adjust music duration to match voice (using REAL duration)
+    # Adjust music duration to match voice (using REAL duration + padding)
     music_audio = _adjust_music_to_duration(music_audio, voice_duration_ms)
     logger.info(f"🎵 Music adjusted to: {len(music_audio)/1000:.1f}s")
 
