@@ -782,6 +782,244 @@ def apply_video_branding_from_bytes(
 
 
 # ============================================================
+# 🆕 V3: CTA OVERLAY (Follow / Like / Share)
+# ============================================================
+
+# CTA size presets
+CTA_PRESETS = {
+    "small": {
+        # Single image — chota, bottom-right corner, subtle
+        "font_size":       28,
+        "emoji_size":      24,
+        "pill_height":     40,
+        "pill_padding_x":  14,
+        "pill_padding_y":  6,
+        "pill_gap":        12,
+        "pill_radius":     20,
+        "position":        "bottom-right",   # corner
+        "opacity":         180,
+        "banner":          False,            # No gradient banner
+        "brand_font_size": 0,                # No brand text
+        "bg_color":        (0, 0, 0, 120),   # subtle dark
+        "text_color":      (255, 255, 255, 255),
+        "pill_colors": [
+            (255, 140, 0, 255),    # Saffron
+            (220, 40, 40, 255),    # Red
+            (34, 170, 34, 255),    # Green
+        ],
+    },
+    "thumbnail": {
+        # Carousel slide 1 — medium, bottom banner
+        "font_size":       42,
+        "emoji_size":      36,
+        "pill_height":     58,
+        "pill_padding_x":  22,
+        "pill_padding_y":  10,
+        "pill_gap":        20,
+        "pill_radius":     30,
+        "position":        "bottom-banner",
+        "opacity":         220,
+        "banner":          True,
+        "brand_font_size": 28,
+        "bg_color":        (0, 0, 0, 200),
+        "text_color":      (255, 255, 255, 255),
+        "pill_colors": [
+            (255, 140, 0, 255),    # Saffron
+            (220, 40, 40, 255),    # Red
+            (34, 170, 34, 255),    # Green
+        ],
+    },
+    "bold": {
+        # Reel thumbnail / scene 1 — BIG, door se dikhe
+        "font_size":       62,
+        "emoji_size":      52,
+        "pill_height":     78,
+        "pill_padding_x":  30,
+        "pill_padding_y":  12,
+        "pill_gap":        28,
+        "pill_radius":     40,
+        "position":        "bottom-banner",
+        "opacity":         250,
+        "banner":          True,
+        "brand_font_size": 34,
+        "bg_color":        (0, 0, 0, 230),
+        "text_color":      (255, 255, 255, 255),
+        "pill_colors": [
+            (255, 140, 0, 255),    # Saffron
+            (220, 40, 40, 255),    # Red
+            (34, 170, 34, 255),    # Green
+        ],
+    },
+}
+
+
+def apply_cta_overlay(
+    image_bytes: bytes,
+    style: str = "thumbnail",
+    cta_texts: list = None,
+    brand_handle: str = None
+) -> bytes:
+    """
+    🆕 Apply Follow / Like / Share CTA overlay on image.
+
+    Args:
+        image_bytes:  Raw image bytes
+        style:        "small" | "thumbnail" | "bold"
+        cta_texts:    List of (emoji, label) tuples.
+                      Default: [("🔥","Follow"), ("❤️","Like"), ("🔄","Share")]
+        brand_handle: Handle text below buttons (default: @sanatanii_soch)
+
+    Returns:
+        Image bytes with CTA overlay applied
+    """
+    if cta_texts is None:
+        cta_texts = [("🔥", "FOLLOW"), ("❤️", "LIKE"), ("🔄", "SHARE")]
+
+    if brand_handle is None:
+        brand_handle = BRANDING["handle"]
+
+    preset = CTA_PRESETS.get(style, CTA_PRESETS["thumbnail"])
+
+    try:
+        img = Image.open(BytesIO(image_bytes))
+        if img.mode != "RGBA":
+            img = img.convert("RGBA")
+
+        img_w, img_h = img.size
+        overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(overlay)
+
+        font_main = _load_font(preset["font_size"])
+        font_brand = _load_font(preset["brand_font_size"]) if preset["brand_font_size"] else None
+
+        pill_h = preset["pill_height"]
+        pad_x = preset["pill_padding_x"]
+        pad_y = preset["pill_padding_y"]
+        gap = preset["pill_gap"]
+        radius = preset["pill_radius"]
+        pill_colors = preset["pill_colors"]
+        text_color = preset["text_color"]
+
+        # ── Measure all pills ────────────────────────────
+        pill_rects = []
+        total_pills_w = 0
+
+        for idx, (emoji, label) in enumerate(cta_texts):
+            full_text = f" {emoji}  {label} "
+            bbox = draw.textbbox((0, 0), full_text, font=font_main)
+            tw = bbox[2] - bbox[0]
+            th = bbox[3] - bbox[1]
+            pw = tw + pad_x * 2
+            ph = pill_h
+            pill_rects.append({
+                "text": full_text,
+                "w": pw,
+                "h": ph,
+                "tw": tw,
+                "th": th,
+                "color": pill_colors[idx % len(pill_colors)],
+            })
+            total_pills_w += pw
+
+        total_pills_w += gap * (len(cta_texts) - 1)
+
+        # ── Banner area ──────────────────────────────────
+        if preset["banner"]:
+            banner_h = pill_h + 60
+            if font_brand:
+                banner_h += 35
+            banner_y = img_h - banner_h
+
+            # Gradient: transparent → dark
+            for i in range(banner_h):
+                alpha = int(preset["bg_color"][3] * (i / banner_h))
+                draw.rectangle(
+                    [(0, banner_y + i), (img_w, banner_y + i + 1)],
+                    fill=(preset["bg_color"][0], preset["bg_color"][1],
+                          preset["bg_color"][2], alpha)
+                )
+            pill_y = banner_y + 18
+            # Centered horizontally
+            start_x = (img_w - total_pills_w) // 2
+        else:
+            # Small style: bottom-right corner, no banner
+            padding_edge = 20
+            pill_y = img_h - pill_h - padding_edge
+            start_x = img_w - total_pills_w - padding_edge
+
+        # ── Draw pills ───────────────────────────────────
+        cur_x = start_x
+
+        for pr in pill_rects:
+            # Pill background
+            pill_box = [
+                cur_x, pill_y,
+                cur_x + pr["w"], pill_y + pr["h"]
+            ]
+            draw.rounded_rectangle(
+                pill_box,
+                radius=radius,
+                fill=pr["color"]
+            )
+
+            # Shadow
+            text_x = cur_x + pad_x
+            text_y = pill_y + (pr["h"] - pr["th"]) // 2
+            draw.text(
+                (text_x + 1, text_y + 1),
+                pr["text"],
+                font=font_main,
+                fill=(0, 0, 0, 150)
+            )
+            # Main text
+            draw.text(
+                (text_x, text_y),
+                pr["text"],
+                font=font_main,
+                fill=text_color
+            )
+
+            cur_x += pr["w"] + gap
+
+        # ── Brand handle ─────────────────────────────────
+        if font_brand and preset["banner"]:
+            handle_y = pill_y + pill_h + 10
+            bbox_h = draw.textbbox((0, 0), brand_handle, font=font_brand)
+            hw = bbox_h[2] - bbox_h[0]
+            hx = (img_w - hw) // 2
+            draw.text(
+                (hx + 1, handle_y + 1),
+                brand_handle,
+                font=font_brand,
+                fill=(0, 0, 0, 180)
+            )
+            draw.text(
+                (hx, handle_y),
+                brand_handle,
+                font=font_brand,
+                fill=(255, 215, 0, 230)  # Gold
+            )
+
+        # ── Composite + save ─────────────────────────────
+        final = Image.alpha_composite(img, overlay)
+        final = final.convert("RGB")
+
+        output = BytesIO()
+        final.save(output, format="JPEG", quality=92, optimize=True)
+        output.seek(0)
+        result = output.read()
+
+        logger.info(
+            f"✅ CTA overlay ({style}): {len(image_bytes):,} → {len(result):,} bytes"
+        )
+        return result
+
+    except Exception as e:
+        logger.error(f"❌ CTA overlay failed: {e}", exc_info=True)
+        return image_bytes
+
+
+# ============================================================
 # STANDALONE TEST
 # ============================================================
 
@@ -834,6 +1072,38 @@ if __name__ == "__main__":
             print(f"✅ {strategy:10s} → {out_file} ({len(result):,} bytes)")
         except Exception as e:
             print(f"❌ {strategy:10s} → Failed: {e}")
+
+    # ═══════════════════════════════════════════
+    # TEST 1.5: CTA OVERLAY (NEW)
+    # ═══════════════════════════════════════════
+    print("\n" + "=" * 60)
+    print("TEST 1.5: CTA OVERLAY (Follow / Like / Share)")
+    print("=" * 60)
+
+    # Portrait test image (1080x1920 — like reel)
+    portrait_img = Image.new("RGB", (1080, 1920))
+    p_pixels = portrait_img.load()
+    for y in range(1920):
+        for x in range(1080):
+            r = int(100 + 100 * (y / 1920))
+            g = int(50 + 100 * (x / 1080))
+            b = int(150 - 80 * (y / 1920))
+            p_pixels[x, y] = (r, g, b)
+
+    p_buf = BytesIO()
+    portrait_img.save(p_buf, format="JPEG", quality=90)
+    portrait_bytes = p_buf.getvalue()
+
+    cta_styles = ["small", "thumbnail", "bold"]
+    for cta_style in cta_styles:
+        try:
+            result = apply_cta_overlay(portrait_bytes, style=cta_style)
+            out_file = f"test_cta_{cta_style}.jpg"
+            with open(out_file, "wb") as f:
+                f.write(result)
+            print(f"✅ {cta_style:12s} → {out_file} ({len(result):,} bytes)")
+        except Exception as e:
+            print(f"❌ {cta_style:12s} → Failed: {e}")
 
     # ═══════════════════════════════════════════
     # TEST 2: VIDEO WATERMARKING

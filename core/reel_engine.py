@@ -54,7 +54,7 @@ from core.recovery_manager import save_checkpoint
 
 from utils.logger import get_logger
 from utils.vertex_ai import generate_image_vertex
-from utils.watermark import apply_branding, apply_video_branding
+from utils.watermark import apply_branding, apply_video_branding, apply_cta_overlay
 from utils.humanizer import humanize_image
 
 # Reels modules
@@ -391,6 +391,14 @@ def _run_stage_image_generation(memory: AgentMemory) -> AgentMemory:
 
         # Apply watermark + humanize
         processed_bytes = _apply_scene_processing(raw_bytes, scene_num)
+
+        # ── CTA overlay on scene 1 (hook) only ──────────
+        if scene_num == 1:
+            try:
+                logger.info(f"   📌 Scene 1: bold CTA overlay लगा रहे हैं...")
+                processed_bytes = apply_cta_overlay(processed_bytes, style="bold")
+            except Exception as e:
+                logger.warning(f"   ⚠️  CTA overlay failed on scene 1: {e}")
 
         # Save to scene
         scene["image_bytes"] = processed_bytes
@@ -856,6 +864,58 @@ def _run_stage_thumbnail(memory: AgentMemory) -> AgentMemory:
 
         # Small "▶️ Watch Now" text
         draw.text((60, 1780), "▶ देखिए पूरी कहानी", font=font_brand, fill=(255, 255, 255, 180))
+
+        # ═══════════════════════════════════════════
+        # FOLLOW / LIKE / SHARE BUTTONS (Bold CTA)
+        # ═══════════════════════════════════════════
+        cta_y = 1550
+        cta_items = [
+            ("🔥", "FOLLOW", (255, 153, 51)),
+            ("❤️", "LIKE",   (255, 69, 0)),
+            ("🔄", "SHARE",  (50, 205, 50)),
+        ]
+        cta_gap = 22
+        cta_pad_x = 18
+        cta_pill_h = 55
+
+        # Measure all pills
+        cta_pills = []
+        total_cta_w = 0
+        from utils.watermark import _load_font as _wm_font
+        cta_font = _wm_font(38)
+
+        for emoji, label, color in cta_items:
+            txt = f" {emoji}  {label} "
+            try:
+                bb = cta_font.getbbox(txt)
+                tw = bb[2] - bb[0]
+            except Exception:
+                tw = len(txt) * 18
+            pw = tw + cta_pad_x * 2
+            cta_pills.append({"text": txt, "w": pw, "color": color})
+            total_cta_w += pw
+
+        total_cta_w += cta_gap * 2
+
+        # Draw pills centered
+        cx = (1080 - total_cta_w) // 2
+        for pr in cta_pills:
+            draw.rounded_rectangle(
+                [(cx, cta_y), (cx + pr["w"], cta_y + cta_pill_h)],
+                radius=28,
+                fill=(*pr["color"], 240)
+            )
+            # Shadow
+            draw.text(
+                (cx + cta_pad_x + 1, cta_y + 9),
+                pr["text"], font=cta_font, fill=(0, 0, 0, 150)
+            )
+            # Text
+            draw.text(
+                (cx + cta_pad_x, cta_y + 8),
+                pr["text"], font=cta_font, fill=(255, 255, 255, 255)
+            )
+            cx += pr["w"] + cta_gap
 
         # ═══════════════════════════════════════════
         # COMPOSE FINAL

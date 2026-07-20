@@ -21,6 +21,7 @@ from PIL import Image, ImageDraw, ImageFont
 from config.settings import GEMINI_API_KEY, GEMINI_MODEL
 from utils.logger import get_logger
 from utils.vertex_ai import generate_image_vertex
+from utils.watermark import apply_cta_overlay
 from core.recovery_manager import save_checkpoint
 
 logger = get_logger("carousel_engine")
@@ -672,6 +673,14 @@ def build_carousel(
             slide_number=slide_num,
             total_slides=5
         )
+
+        # ── CTA on slide 1 (hook) only ──────────────────
+        if slide_num == 1:
+            try:
+                logger.info(f"📌 स्लाइड 1 पर CTA overlay लगा रहे हैं...")
+                final_bytes = apply_cta_overlay(final_bytes, style="thumbnail")
+            except Exception as e:
+                logger.warning(f"⚠️  CTA overlay failed on slide 1: {e}")
 
         slide["image_bytes"] = final_bytes
         slide["image_url"]   = slide.get("image_url", "")

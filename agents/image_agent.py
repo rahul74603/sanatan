@@ -21,7 +21,7 @@ from utils.gcs_helper import upload_image
 from utils.humanizer import humanize_image
 from utils.vertex_ai import generate_image_vertex
 from utils.logger import get_logger
-from utils.watermark import apply_branding
+from utils.watermark import apply_branding, apply_cta_overlay
 
 logger = get_logger("image_agent")
 
@@ -477,6 +477,18 @@ def run(memory: AgentMemory) -> AgentMemory:
             )
         except Exception as e:
             logger.warning(f"Branding failed (using unbranded): {e}")
+
+        # ── Phase 2.6: CTA OVERLAY (Follow / Like / Share) ──
+        logger.info("\n--- PHASE 2.6: CTA OVERLAY ---")
+        try:
+            pre_cta = len(image_bytes)
+            image_bytes = apply_cta_overlay(image_bytes, style="small")
+            logger.info(
+                f"📌 CTA applied: {pre_cta:,} → {len(image_bytes):,} bytes | "
+                f"style: small"
+            )
+        except Exception as e:
+            logger.warning(f"CTA overlay failed (using without CTA): {e}")
 
         # ── Phase 3: Upload ───────────────────────────────────
         logger.info("\n--- PHASE 3: UPLOAD ---")
