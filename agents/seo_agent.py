@@ -254,6 +254,39 @@ DEITY_NAMES = {
 # GEMINI-POWERED TRENDING KEYWORDS
 # ============================================================
 
+def _extract_response_text(response) -> str:
+    """
+    Gemini responses are not always a single text part. The response.text
+    convenience accessor can raise for multi-part responses, so fall back to
+    iterating over candidate parts safely.
+    """
+    try:
+        text = response.text.strip()
+        if text:
+            return text
+    except Exception:
+        pass
+
+    try:
+        candidates = getattr(response, "candidates", []) or []
+        texts = []
+        for candidate in candidates:
+            content = getattr(candidate, "content", None)
+            parts = getattr(content, "parts", []) or []
+            for part in parts:
+                part_text = getattr(part, "text", "")
+                if part_text:
+                    texts.append(part_text)
+
+        combined = "\n".join(texts).strip()
+        if combined:
+            return combined
+    except Exception:
+        pass
+
+    raise Exception("Cannot extract text from Gemini response")
+
+
 def _get_trending_keywords(topic: str, category: str) -> dict:
     """
     Use Gemini to find trending keywords for this specific topic.
@@ -288,7 +321,7 @@ Make keywords SEARCHABLE (what people actually type in search)."""
             }
         )
 
-        raw = response.text.strip()
+        raw = _extract_response_text(response)
 
         # Clean JSON
         raw = re.sub(r'```json\s*', '', raw)
@@ -317,6 +350,30 @@ Make keywords SEARCHABLE (what people actually type in search)."""
 # PLATFORM-SPECIFIC SEO GENERATORS
 # ============================================================
 
+def _topic_short_for_hook(topic: str, category: str) -> str:
+    """Return a natural short topic for Hindi hooks (avoid raw English chunks)."""
+    deity = DEITY_NAMES.get(category, DEITY_NAMES["motivational"])
+
+    # If the topic already has Hindi, use the first few Hindi words.
+    hindi_chars = ''.join(c for c in topic if '\u0900' <= c <= '\u097F' or c == ' ').strip()
+    hindi_words = hindi_chars.split()
+    if len(hindi_words) >= 2:
+        return ' '.join(hindi_words[:4])
+
+    category_topic = {
+        "krishna": "कृष्ण लीला",
+        "shiva": "महादेव की कथा",
+        "hanuman": "हनुमान जी की कथा",
+        "ganesha": "गणेश जी की कथा",
+        "durga": "मां दुर्गा की कथा",
+        "ram": "श्री राम की कथा",
+        "temple": "मंदिर की कथा",
+        "motivational": "जीवन की सीख",
+        "spiritual_nature": "आध्यात्मिक सीख",
+    }
+    return category_topic.get(category, deity["hindi"])
+
+
 def _generate_ig_seo(memory: AgentMemory, trending: dict) -> dict:
     """Generate Instagram-optimized SEO data"""
 
@@ -328,8 +385,7 @@ def _generate_ig_seo(memory: AgentMemory, trending: dict) -> dict:
     hook = trending.get("hook_line", "")
     if not hook:
         template = random.choice(IG_HOOK_TEMPLATES)
-        topic_words = memory.topic.split()[:3]
-        topic_short = ' '.join(topic_words)
+        topic_short = _topic_short_for_hook(memory.topic, category)
         hook = template.format(
             percentage=random.choice([90, 95, 99]),
             deity=deity["hindi"],

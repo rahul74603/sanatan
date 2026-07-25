@@ -19,6 +19,9 @@ numpy==1.26.2
 # 🌐 HTTP & UTILITIES (Existing)
 # ─────────────────────────────────────────────────────────
 requests==2.31.0
+urllib3==2.2.3
+charset-normalizer==3.4.0
+chardet==5.2.0
 python-dotenv==1.0.0
 functions-framework==3.5.0
 colorama==0.4.6

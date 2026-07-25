@@ -62,12 +62,21 @@ logger = get_logger("youtube")
 # CONFIGURATION
 # ============================================================
 
-# YouTube API scopes required
+# YouTube API scopes required.
+# Keep the runtime upload scope minimal so older saved refresh tokens keep working.
+# Adding broader scopes (for example youtube.force-ssl) requires regenerating the
+# OAuth token and can cause `invalid_scope` during automatic refresh.
+YOUTUBE_UPLOAD_SCOPE = "https://www.googleapis.com/auth/youtube.upload"
+YOUTUBE_READONLY_SCOPE = "https://www.googleapis.com/auth/youtube.readonly"
+
 SCOPES = [
-    "https://www.googleapis.com/auth/youtube.upload",
-    "https://www.googleapis.com/auth/youtube.readonly",
-    "https://www.googleapis.com/auth/youtube.force-ssl",  # 🆕 V3: For reading + posting comments
+    YOUTUBE_UPLOAD_SCOPE,
+    YOUTUBE_READONLY_SCOPE,
 ]
+
+# Emergency fallback for older tokens that were authorized for upload only.
+# This still allows the publishing pipeline to upload Shorts.
+UPLOAD_ONLY_SCOPES = [YOUTUBE_UPLOAD_SCOPE]
 
 # YouTube Data API service
 API_SERVICE_NAME = "youtube"
@@ -141,7 +150,34 @@ def _load_credentials() -> Optional[Credentials]:
 
         except Exception as e:
             logger.error(f"❌ Token refresh failed: {e}")
-            creds = None
+
+            # Common after code scope changes: the saved refresh token was
+            # authorized for youtube.upload only, but runtime requested broader
+            # scopes. Retry with upload-only scope so publishing can continue.
+            if "invalid_scope" in str(e):
+                logger.warning("⚠️  Retrying YouTube token refresh with upload-only scope...")
+                try:
+                    fallback_creds = Credentials.from_authorized_user_file(
+                        str(token_path),
+                        UPLOAD_ONLY_SCOPES
+                    )
+                    fallback_creds.refresh(Request())
+
+                    with open(token_path, 'w') as f:
+                        f.write(fallback_creds.to_json())
+
+                    logger.info("✅ Token refreshed with upload-only scope and saved")
+                    creds = fallback_creds
+                except Exception as fallback_error:
+                    logger.error(f"❌ Upload-only token refresh also failed: {fallback_error}")
+                    logger.error(
+                        "❌ YouTube token पुरानी/गलत scopes के साथ बना है. "
+                        "Run: python -m posting.youtube और नया sanatani_youtube_token.json "
+                        "बनाकर YOUTUBE_TOKEN_JSON secret update करें."
+                    )
+                    creds = None
+            else:
+                creds = None
 
     if creds and creds.valid:
         _credentials = creds

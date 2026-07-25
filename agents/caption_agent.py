@@ -617,6 +617,35 @@ def _validate_caption(caption: str, category: str) -> tuple:
     return True, "Valid"
 
 
+def _ensure_deity_reference(caption: str, category: str) -> str:
+    """
+    Soft-fix generated captions that are good but forgot the deity name.
+    This avoids another Gemini call and improves relevance/SEO for free.
+    """
+    if category not in ["krishna", "shiva", "hanuman", "ganesha", "ram", "durga"]:
+        return caption
+
+    deity = _get_deity_context(category)
+    deity_words = deity.get("names", []) + deity.get("phrases", [])
+    if not deity_words:
+        return caption
+
+    caption_lower = caption.lower()
+    if any(word.lower() in caption_lower for word in deity_words):
+        return caption
+
+    phrase = random.choice(deity.get("phrases", []) or deity.get("names", []))
+    emoji = random.choice(deity.get("closings", ["🙏"]))
+
+    # Keep it short and natural; hashtags are added separately.
+    addition = f"\n\n{phrase} {emoji}"
+    if len(caption) + len(addition) <= 800:
+        logger.info(f"✅ Deity reference auto-added: {phrase}")
+        return f"{caption}{addition}"
+
+    return caption
+
+
 def _get_fallback_caption(category: str) -> str:
     """Get category-specific fallback caption"""
     # Try exact category match
@@ -705,6 +734,8 @@ def run(memory: AgentMemory) -> AgentMemory:
             caption = humanize_caption(caption)
         except Exception as e:
             logger.warning(f"Humanization failed: {e}")
+
+        caption = _ensure_deity_reference(caption, memory.category)
 
         memory.caption = caption
         memory.caption_style = style_name
