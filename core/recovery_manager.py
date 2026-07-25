@@ -33,8 +33,9 @@ Recovery Stages (Carousel):
 import json
 import time
 import shutil
+import math
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Optional, List
 
 from utils.logger import get_logger
@@ -120,6 +121,81 @@ def _get_session_dir(session_id: str) -> Path:
     return RECOVERY_DIR / session_id
 
 
+def _make_json_serializable(value, _seen: Optional[set] = None):
+    """
+    Recovery JSON को robust बनाओ.
+
+    कुछ video/analytics libraries numpy scalar values (जैसे np.int64,
+    np.float64) return करती हैं। Python का default json.dump उन्हें serialize
+    नहीं कर पाता और checkpoint टूट जाता है। यह helper nested dict/list के अंदर
+    ऐसे values को normal Python types में बदल देता है।
+    """
+    if _seen is None:
+        _seen = set()
+
+    # Primitive values
+    if value is None or isinstance(value, (str, bool)):
+        return value
+
+    if isinstance(value, int):
+        return int(value)
+
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+
+    if isinstance(value, Path):
+        return str(value)
+
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return f"<bytes:{len(value)}>"
+
+    # Avoid infinite recursion on self-referential containers
+    value_id = id(value)
+    if value_id in _seen:
+        return "<recursive>"
+
+    # numpy scalar support without requiring numpy as a hard import here
+    if hasattr(value, "item") and callable(getattr(value, "item", None)):
+        try:
+            return _make_json_serializable(value.item(), _seen)
+        except Exception:
+            pass
+
+    # numpy arrays / pandas-like objects
+    if hasattr(value, "tolist") and callable(getattr(value, "tolist", None)):
+        try:
+            return _make_json_serializable(value.tolist(), _seen)
+        except Exception:
+            pass
+
+    if isinstance(value, dict):
+        _seen.add(value_id)
+        try:
+            return {
+                str(_make_json_serializable(k, _seen)): _make_json_serializable(v, _seen)
+                for k, v in value.items()
+            }
+        finally:
+            _seen.discard(value_id)
+
+    if isinstance(value, (list, tuple, set)):
+        _seen.add(value_id)
+        try:
+            return [_make_json_serializable(item, _seen) for item in value]
+        finally:
+            _seen.discard(value_id)
+
+    # Last chance: if json can handle it, keep as-is; otherwise stringify.
+    try:
+        json.dumps(value, ensure_ascii=False, allow_nan=False)
+        return value
+    except (TypeError, ValueError):
+        return str(value)
+
+
 # ============================================================
 # CHECKPOINT SAVE
 # ============================================================
@@ -194,12 +270,18 @@ def save_checkpoint(
             "stage_hindi":    STAGE_NAMES_HINDI.get(stage, stage),
             "timestamp":      datetime.now().isoformat(),
             "last_updated":   datetime.now().isoformat(),
-            "data":           data,
+            "data":           _make_json_serializable(data),
         }
 
         state_path = session_dir / "state.json"
         with open(state_path, 'w', encoding='utf-8') as f:
-            json.dump(state, f, indent=2, ensure_ascii=False)
+            json.dump(
+                _make_json_serializable(state),
+                f,
+                indent=2,
+                ensure_ascii=False,
+                allow_nan=False,
+            )
 
         stage_name = STAGE_NAMES_HINDI.get(stage, stage)
         logger.info(f"💾 Checkpoint सहेजा गया: {stage_name} (सेशन: {session_id[:8]})")

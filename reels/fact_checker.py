@@ -179,6 +179,7 @@ def _build_fact_check_prompt(story: str, category: str, topic: str) -> str:
 
 📖 STORY जो check करनी है:
 
+{story}
 
 ═══════════════════════════════════════════
 ✅ IMPORTANT FACTS ({category}):
