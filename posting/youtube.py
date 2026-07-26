@@ -1011,6 +1011,8 @@ def verify_setup() -> dict:
         "client_working": False,
         "channel_accessible": False,
         "channel_info": None,
+        "channel_check_optional": YOUTUBE_READONLY_SCOPE not in SCOPES,
+        "upload_ready": False,
     }
 
     # Test credentials
@@ -1028,14 +1030,25 @@ def verify_setup() -> dict:
         except Exception as e:
             checks["client_error"] = str(e)
 
-    # Test channel access
-    if checks["client_working"]:
+    # Test channel access only when readonly scope is requested.
+    # Upload-only tokens intentionally cannot call channels().list(mine=True),
+    # but they are still valid for uploads and refresh correctly.
+    if checks["client_working"] and not checks["channel_check_optional"]:
         try:
             info = get_channel_info()
             checks["channel_accessible"] = info is not None
             checks["channel_info"] = info
         except Exception as e:
             checks["channel_error"] = str(e)
+
+    checks["upload_ready"] = all([
+        checks["libraries_installed"],
+        checks["config_enabled"],
+        checks["client_secrets_exists"],
+        checks["token_exists"],
+        checks["credentials_valid"],
+        checks["client_working"],
+    ])
 
     return checks
 
@@ -1093,7 +1106,11 @@ if __name__ == "__main__":
     print(f"   Token exists         : {'✅' if checks['token_exists'] else '❌'}")
     print(f"   Credentials valid    : {'✅' if checks['credentials_valid'] else '❌'}")
     print(f"   Client working       : {'✅' if checks['client_working'] else '❌'}")
-    print(f"   Channel accessible   : {'✅' if checks['channel_accessible'] else '❌'}")
+    if checks.get('channel_check_optional'):
+        print("   Channel accessible   : ⏭️  Skipped (upload-only token; OK)")
+    else:
+        print(f"   Channel accessible   : {'✅' if checks['channel_accessible'] else '❌'}")
+    print(f"   Upload ready         : {'✅' if checks.get('upload_ready') else '❌'}")
 
     if checks.get('channel_info'):
         info = checks['channel_info']
@@ -1125,20 +1142,14 @@ if __name__ == "__main__":
         if key in checks:
             print(f"\n❌ {key}: {checks[key]}")
 
-    # Ready for uploads?
-    all_ok = all([
-        checks['libraries_installed'],
-        checks['config_enabled'],
-        checks['client_secrets_exists'],
-        checks['token_exists'],
-        checks['credentials_valid'],
-        checks['client_working'],
-        checks['channel_accessible'],
-    ])
+    # Ready for uploads? Channel accessibility is optional in upload-only mode.
+    all_ok = checks.get('upload_ready', False) and (
+        checks.get('channel_check_optional') or checks.get('channel_accessible')
+    )
 
     print("\n" + "═" * 60)
     if all_ok:
-        print("🎉 ALL CHECKS PASSED — Ready for uploads!")
+        print("🎉 UPLOAD CHECKS PASSED — Ready for YouTube uploads!")
         print("═" * 60)
         print("\n📝 Add to GitHub secrets:")
         print(f"   YOUTUBE_TOKEN_JSON = [content of {token_path.name}]")
