@@ -162,7 +162,9 @@ class AgentMemory:
     reel_thumbnail_url: str = ""                # Custom thumbnail URL
     reel_thumbnail_path: str = ""               # Local thumbnail/card path
     reel_thumbnail_title: str = ""              # Title used on thumbnail card
-    reel_thumbnail_bytes: Optional[bytes] = None # Local PIL-generated card bytes
+    reel_thumbnail_bytes: Optional[bytes] = None # Final thumbnail/card bytes
+    reel_thumbnail_ai_generated: bool = False   # Extra AI thumbnail background generated?
+    reel_thumbnail_provider: str = ""           # Provider used for thumbnail background
     reel_cta_card_duration: float = 0.0         # CTA card duration inside video
 
     # ═══════════════════════════════════════════
@@ -354,6 +356,8 @@ class AgentMemory:
             "reel_thumbnail_url":    self.reel_thumbnail_url,
             "reel_thumbnail_path":   self.reel_thumbnail_path,
             "reel_thumbnail_title":  self.reel_thumbnail_title,
+            "reel_thumbnail_ai_generated": self.reel_thumbnail_ai_generated,
+            "reel_thumbnail_provider": self.reel_thumbnail_provider,
             "reel_cta_card_duration": self.reel_cta_card_duration,
 
             "errors":              self.errors,
@@ -429,6 +433,8 @@ class AgentMemory:
         self.reel_thumbnail_url    = data.get("reel_thumbnail_url", "")
         self.reel_thumbnail_path   = data.get("reel_thumbnail_path", "")
         self.reel_thumbnail_title  = data.get("reel_thumbnail_title", "")
+        self.reel_thumbnail_ai_generated = data.get("reel_thumbnail_ai_generated", False)
+        self.reel_thumbnail_provider = data.get("reel_thumbnail_provider", "")
         self.reel_cta_card_duration = data.get("reel_cta_card_duration", 0.0)
 
         # 🆕 Restore reel scene image bytes

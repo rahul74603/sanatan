@@ -150,25 +150,87 @@ def _check_stage_needed(memory: AgentMemory, field: str, stage_name: str) -> boo
     return True
 
 
+def _build_thumbnail_background_prompt(topic: str, category: str) -> str:
+    """Prompt for the extra AI thumbnail background image (text overlay is local)."""
+    category_style = {
+        "ram": "Lord Ram, bow and arrow, golden forest exile atmosphere, dharmic royal aura",
+        "krishna": "Lord Krishna, divine blue aura, peacock feather, Vrindavan glow",
+        "shiva": "Lord Shiva, cosmic Himalayan aura, trident, moonlight, sacred smoke",
+        "hanuman": "Lord Hanuman, saffron aura, heroic devotional energy, Ram bhakti",
+        "ganesha": "Lord Ganesha, auspicious golden temple aura, modak, divine blessings",
+        "durga": "Maa Durga, lion, red-gold shakti aura, protective divine energy",
+    }.get(category, "Sanatan Dharma divine spiritual aura, temple glow, devotional atmosphere")
+
+    return f"""Create a premium vertical YouTube Shorts / Instagram Reel thumbnail background.
+
+Topic: {topic}
+Visual theme: {category_style}
+
+Requirements:
+- 9:16 vertical poster composition
+- cinematic devotional Indian spiritual art
+- strong central divine subject, dramatic depth, warm saffron and gold lighting
+- clean empty dark areas at top and bottom for text overlay
+- high contrast, viral thumbnail look, premium digital art
+- NO text, NO letters, NO captions, NO logo, NO watermark, NO UI, NO frame
+- respectful Hindu devotional style, beautiful and shareable
+""".strip()
+
+
 def _prebuild_branded_thumbnail_card(memory: AgentMemory) -> AgentMemory:
     """
-    Create a no-cost branded thumbnail/CTA card right after topic selection.
+    Generate an extra AI thumbnail image right after topic selection, then
+    overlay title/Like/Share/Follow/Subscribe/handles locally for accuracy.
     This is later used both as reel cover and as an adjustable end-card scene.
     """
     if getattr(memory, "reel_thumbnail_bytes", None):
         return memory
 
+    background_bytes = None
+    provider = "local_fallback"
+
     try:
-        logger.info("🖼️  Prebuilding branded thumbnail/CTA card from topic...")
+        logger.info("🖼️  Generating EXTRA AI thumbnail background from topic...")
+        prompt = _build_thumbnail_background_prompt(memory.topic, memory.category)
+        background_bytes, metadata = generate_image_vertex(
+            prompt=prompt,
+            negative_prompt="text, words, letters, watermark, logo, caption, signature, blurry, distorted faces, disrespectful",
+            aspect_ratio="9:16",
+            allow_free=True,
+        )
+        provider = (metadata or {}).get("provider", "unknown")
+
+        if background_bytes and len(background_bytes) > 10_000:
+            memory.reel_thumbnail_ai_generated = True
+            memory.reel_thumbnail_provider = provider
+            logger.info(
+                f"✅ Extra AI thumbnail background ready — "
+                f"{len(background_bytes)/1024:.0f} KB via {provider}"
+            )
+        else:
+            logger.warning("⚠️  AI thumbnail background too small/empty; using fallback card")
+            background_bytes = None
+            provider = "local_fallback"
+
+    except Exception as e:
+        logger.warning(f"⚠️  Extra AI thumbnail background failed, using fallback card: {e}")
+        background_bytes = None
+        provider = "local_fallback"
+
+    try:
+        logger.info("🖼️  Composing final thumbnail with title + social CTAs...")
         card = generate_thumbnail_card(
             topic=memory.topic,
             category=memory.category,
             session_id=memory.session_id,
+            background_bytes=background_bytes,
         )
         memory.reel_thumbnail_bytes = card["bytes"]
         memory.reel_thumbnail_path = card["path"]
         memory.reel_thumbnail_title = card["title"]
-        logger.info("✅ Branded thumbnail/CTA card ready")
+        if not memory.reel_thumbnail_provider:
+            memory.reel_thumbnail_provider = provider
+        logger.info("✅ Final AI thumbnail/CTA card ready")
     except Exception as e:
         logger.warning(f"⚠️  Branded thumbnail card prebuild failed: {e}")
 
@@ -1026,8 +1088,10 @@ def _calculate_costs(memory: AgentMemory) -> dict:
         if not s.get("is_thumbnail_card")
     )
 
-    # Estimate: ₹1 average per AI-generated image (thumbnail card is local/free)
-    image_cost = num_images * 1.0
+    # Estimate: ₹1 average per AI-generated image.
+    # Thumbnail background is an extra AI image when enabled/successful.
+    thumbnail_images = 1 if getattr(memory, "reel_thumbnail_ai_generated", False) else 0
+    image_cost = (num_images + thumbnail_images) * 1.0
 
     # TTS: ~₹0.50 per 500 chars
     story_chars = len(memory.reel_story) if memory.reel_story else 500
@@ -1278,7 +1342,13 @@ def build_reel(
         logger.info(f"✅ Fact checked   : {memory.reel_fact_checked}")
         logger.info(f"🖼️  Scenes         : {successful_scenes}/6")
         if thumbnail_card_added:
-            logger.info(f"🖼️  Thumbnail card : Yes ({memory.reel_cta_card_duration:.1f}s, local/free)")
+            thumb_source = (
+                f"AI via {memory.reel_thumbnail_provider}"
+                if memory.reel_thumbnail_ai_generated else "local fallback"
+            )
+            logger.info(
+                f"🖼️  Thumbnail card : Yes ({memory.reel_cta_card_duration:.1f}s, {thumb_source})"
+            )
         logger.info(f"🎤 Voice          : {memory.reel_voice_duration:.1f}s ({memory.reel_voice_gender})")
         logger.info(f"📝 Subtitles      : {'Yes' if memory.reel_subtitle_srt else 'No'}")
         logger.info(f"🎬 Video          : {memory.reel_duration_seconds:.1f}s, {memory.reel_video_size_mb} MB")
@@ -1330,6 +1400,8 @@ def build_reel(
             "thumbnail_bytes": memory.reel_thumbnail_bytes,
             "thumbnail_path": memory.reel_thumbnail_path,
             "thumbnail_title": memory.reel_thumbnail_title,
+            "thumbnail_ai_generated": memory.reel_thumbnail_ai_generated,
+            "thumbnail_provider": memory.reel_thumbnail_provider,
             "cta_card_duration": memory.reel_cta_card_duration,
             "build_time": total_time,
             "cost_inr": costs["total_inr"],

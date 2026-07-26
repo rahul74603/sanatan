@@ -1,7 +1,11 @@
 """
 Branded Thumbnail / CTA Card Generator
 
-No AI/API cost: this uses PIL locally to create a 9:16 image that can be used as:
+This composes a 9:16 thumbnail/CTA card. The background can be an extra
+AI-generated thumbnail image, while all important text is overlaid locally with
+PIL so spellings/handles remain accurate.
+
+Used as:
 - Reel cover/thumbnail
 - Short CTA card inside the final video to absorb small audio/video duration gaps
 
@@ -16,7 +20,7 @@ import textwrap
 from pathlib import Path
 from typing import Tuple
 
-from PIL import Image, ImageDraw, ImageFont, ImageFilter
+from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageEnhance
 
 from config.settings import REEL_WIDTH, REEL_HEIGHT
 from utils.logger import get_logger
@@ -168,6 +172,49 @@ def _topic_title(topic: str, category: str) -> str:
     return title
 
 
+def _fit_background_from_bytes(background_bytes: bytes, width: int, height: int) -> Image.Image:
+    """Load AI-generated background and fit/crop it to 9:16."""
+    bg = Image.open(io.BytesIO(background_bytes))
+    if bg.mode != "RGB":
+        bg = bg.convert("RGB")
+
+    bg_w, bg_h = bg.size
+    bg_aspect = bg_w / bg_h
+    target_aspect = width / height
+
+    if bg_aspect > target_aspect:
+        new_h = height
+        new_w = int(new_h * bg_aspect)
+    else:
+        new_w = width
+        new_h = int(new_w / bg_aspect)
+
+    bg = bg.resize((new_w, new_h), Image.LANCZOS)
+    left = max(0, (new_w - width) // 2)
+    top = max(0, (new_h - height) // 2)
+    bg = bg.crop((left, top, left + width, top + height))
+
+    # Darken and slightly blur behind CTA text for readability.
+    bg = ImageEnhance.Brightness(bg).enhance(0.62)
+    bg = ImageEnhance.Contrast(bg).enhance(1.08)
+    return bg.convert("RGBA")
+
+
+def _gradient_background(width: int, height: int) -> Image.Image:
+    """Fallback warm spiritual background when AI image fails."""
+    img = Image.new("RGB", (width, height), (40, 12, 4))
+    draw = ImageDraw.Draw(img)
+
+    for y in range(height):
+        ratio = y / height
+        r = int(30 + 95 * (1 - ratio) + 18 * ratio)
+        g = int(10 + 58 * (1 - ratio) + 10 * ratio)
+        b = int(8 + 12 * (1 - ratio) + 38 * ratio)
+        draw.line([(0, y), (width, y)], fill=(r, g, b))
+
+    return img.convert("RGBA")
+
+
 # ============================================================
 # PUBLIC API
 # ============================================================
@@ -178,6 +225,7 @@ def generate_thumbnail_card(
     session_id: str = "",
     hook_text: str = "",
     output_dir: str = "logs/thumbnails",
+    background_bytes: bytes = None,
 ) -> dict:
     """
     Generate a 1080x1920 branded thumbnail/CTA image locally.
@@ -193,17 +241,21 @@ def generate_thumbnail_card(
     title = _topic_title(hook_text or topic, category)
     emoji = CATEGORY_EMOJIS.get(category, "🙏")
 
-    # Base warm dark gradient.
-    img = Image.new("RGB", (width, height), (40, 12, 4))
-    draw = ImageDraw.Draw(img)
+    # Base background: extra AI-generated thumbnail image if available,
+    # otherwise local gradient fallback.
+    if background_bytes:
+        try:
+            img = _fit_background_from_bytes(background_bytes, width, height)
+            logger.info("✅ Using AI-generated thumbnail background")
+        except Exception as e:
+            logger.warning(f"⚠️  AI thumbnail background unusable, fallback gradient: {e}")
+            img = _gradient_background(width, height)
+    else:
+        img = _gradient_background(width, height)
 
-    for y in range(height):
-        # top saffron glow → dark maroon → blue-black bottom
-        ratio = y / height
-        r = int(30 + 95 * (1 - ratio) + 18 * ratio)
-        g = int(10 + 58 * (1 - ratio) + 10 * ratio)
-        b = int(8 + 12 * (1 - ratio) + 38 * ratio)
-        draw.line([(0, y), (width, y)], fill=(r, g, b))
+    # Readability veil.
+    veil = Image.new("RGBA", (width, height), (0, 0, 0, 85))
+    img = Image.alpha_composite(img, veil)
 
     # Soft radial glow circles.
     glow = Image.new("RGBA", (width, height), (0, 0, 0, 0))

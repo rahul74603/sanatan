@@ -1355,6 +1355,8 @@ def run_reel_pipeline(force_new: bool = False) -> dict:
             memory.reel_thumbnail_bytes = reel_result.get("thumbnail_bytes", memory.reel_thumbnail_bytes)
             memory.reel_thumbnail_path = reel_result.get("thumbnail_path", memory.reel_thumbnail_path)
             memory.reel_thumbnail_title = reel_result.get("thumbnail_title", memory.reel_thumbnail_title)
+            memory.reel_thumbnail_ai_generated = reel_result.get("thumbnail_ai_generated", memory.reel_thumbnail_ai_generated)
+            memory.reel_thumbnail_provider = reel_result.get("thumbnail_provider", memory.reel_thumbnail_provider)
             memory.reel_cta_card_duration = reel_result.get("cta_card_duration", memory.reel_cta_card_duration)
 
             fake_result = AgentExecutionResult("reel_engine")
@@ -1532,7 +1534,14 @@ def run_reel_pipeline(force_new: bool = False) -> dict:
         thumbnail_scene_count = sum(1 for s in memory.reel_scenes if s.get("is_thumbnail_card"))
         logger.info(f"🖼️  Scenes    : {story_scene_count}")
         if thumbnail_scene_count:
-            logger.info(f"🖼️  CTA card  : {thumbnail_scene_count} ({memory.reel_cta_card_duration:.1f}s)")
+            thumb_source = (
+                f"AI via {memory.reel_thumbnail_provider}"
+                if memory.reel_thumbnail_ai_generated else "local fallback"
+            )
+            logger.info(
+                f"🖼️  CTA card  : {thumbnail_scene_count} "
+                f"({memory.reel_cta_card_duration:.1f}s, {thumb_source})"
+            )
         logger.info("")
         logger.info("📱 PUBLISHING:")
         logger.info(
