@@ -62,12 +62,23 @@ logger = get_logger("youtube")
 # CONFIGURATION
 # ============================================================
 
-# YouTube API scopes required
-SCOPES = [
-    "https://www.googleapis.com/auth/youtube.upload",
-    "https://www.googleapis.com/auth/youtube.readonly",
-    "https://www.googleapis.com/auth/youtube.force-ssl",  # 🆕 V3: For reading + posting comments
-]
+# YouTube API scopes required.
+# Keep the runtime upload scope minimal so older saved refresh tokens keep working.
+# Adding broader scopes (for example youtube.force-ssl) requires regenerating the
+# OAuth token and can cause `invalid_scope` during automatic refresh.
+YOUTUBE_UPLOAD_SCOPE = "https://www.googleapis.com/auth/youtube.upload"
+YOUTUBE_READONLY_SCOPE = "https://www.googleapis.com/auth/youtube.readonly"
+
+# Runtime uploads need ONLY youtube.upload. Keeping this minimal is important:
+# if code requests broader/different scopes than the saved refresh token was
+# granted, Google can reject refresh with `invalid_scope` after the first hour.
+SCOPES = [YOUTUBE_UPLOAD_SCOPE]
+
+# Backward-compatible alias used by refresh fallback.
+UPLOAD_ONLY_SCOPES = SCOPES
+
+# Optional scopes for manual diagnostics only. Do not use these during uploads.
+DIAGNOSTIC_SCOPES = [YOUTUBE_UPLOAD_SCOPE, YOUTUBE_READONLY_SCOPE]
 
 # YouTube Data API service
 API_SERVICE_NAME = "youtube"
@@ -123,6 +134,11 @@ def _load_credentials() -> Optional[Credentials]:
                 SCOPES
             )
             logger.info(f"✅ Loaded YouTube token from {token_path.name}")
+            logger.info(
+                f"🔐 YouTube scopes requested: {SCOPES} | "
+                f"token_scopes: {getattr(creds, 'scopes', None)} | "
+                f"expired: {getattr(creds, 'expired', None)}"
+            )
         except Exception as e:
             logger.warning(f"⚠️  Failed to load token: {e}")
             creds = None
@@ -141,7 +157,34 @@ def _load_credentials() -> Optional[Credentials]:
 
         except Exception as e:
             logger.error(f"❌ Token refresh failed: {e}")
-            creds = None
+
+            # Common after code scope changes: the saved refresh token was
+            # authorized for youtube.upload only, but runtime requested broader
+            # scopes. Retry with upload-only scope so publishing can continue.
+            if "invalid_scope" in str(e):
+                logger.warning("⚠️  Retrying YouTube token refresh with upload-only scope...")
+                try:
+                    fallback_creds = Credentials.from_authorized_user_file(
+                        str(token_path),
+                        UPLOAD_ONLY_SCOPES
+                    )
+                    fallback_creds.refresh(Request())
+
+                    with open(token_path, 'w') as f:
+                        f.write(fallback_creds.to_json())
+
+                    logger.info("✅ Token refreshed with upload-only scope and saved")
+                    creds = fallback_creds
+                except Exception as fallback_error:
+                    logger.error(f"❌ Upload-only token refresh also failed: {fallback_error}")
+                    logger.error(
+                        "❌ YouTube token पुरानी/गलत scopes के साथ बना है. "
+                        "Run: python -m posting.youtube और नया sanatani_youtube_token.json "
+                        "बनाकर YOUTUBE_TOKEN_JSON secret update करें."
+                    )
+                    creds = None
+            else:
+                creds = None
 
     if creds and creds.valid:
         _credentials = creds
@@ -242,11 +285,17 @@ def _initial_oauth_setup():
             SCOPES
         )
 
-        # Run local server to receive OAuth callback
+        # Run local server to receive OAuth callback.
+        # prompt='consent' + include_granted_scopes='false' ensures Google gives
+        # a fresh refresh token for EXACTLY youtube.upload, preventing the
+        # recurring `invalid_scope` refresh failure seen in scheduled runs.
         creds = flow.run_local_server(
             port=0,  # Use any available port
             success_message="✅ Authentication successful! You can close this window.",
-            open_browser=True
+            open_browser=True,
+            access_type='offline',
+            prompt='consent',
+            include_granted_scopes='false'
         )
 
         # Save token
@@ -962,6 +1011,8 @@ def verify_setup() -> dict:
         "client_working": False,
         "channel_accessible": False,
         "channel_info": None,
+        "channel_check_optional": YOUTUBE_READONLY_SCOPE not in SCOPES,
+        "upload_ready": False,
     }
 
     # Test credentials
@@ -979,14 +1030,25 @@ def verify_setup() -> dict:
         except Exception as e:
             checks["client_error"] = str(e)
 
-    # Test channel access
-    if checks["client_working"]:
+    # Test channel access only when readonly scope is requested.
+    # Upload-only tokens intentionally cannot call channels().list(mine=True),
+    # but they are still valid for uploads and refresh correctly.
+    if checks["client_working"] and not checks["channel_check_optional"]:
         try:
             info = get_channel_info()
             checks["channel_accessible"] = info is not None
             checks["channel_info"] = info
         except Exception as e:
             checks["channel_error"] = str(e)
+
+    checks["upload_ready"] = all([
+        checks["libraries_installed"],
+        checks["config_enabled"],
+        checks["client_secrets_exists"],
+        checks["token_exists"],
+        checks["credentials_valid"],
+        checks["client_working"],
+    ])
 
     return checks
 
@@ -1044,7 +1106,11 @@ if __name__ == "__main__":
     print(f"   Token exists         : {'✅' if checks['token_exists'] else '❌'}")
     print(f"   Credentials valid    : {'✅' if checks['credentials_valid'] else '❌'}")
     print(f"   Client working       : {'✅' if checks['client_working'] else '❌'}")
-    print(f"   Channel accessible   : {'✅' if checks['channel_accessible'] else '❌'}")
+    if checks.get('channel_check_optional'):
+        print("   Channel accessible   : ⏭️  Skipped (upload-only token; OK)")
+    else:
+        print(f"   Channel accessible   : {'✅' if checks['channel_accessible'] else '❌'}")
+    print(f"   Upload ready         : {'✅' if checks.get('upload_ready') else '❌'}")
 
     if checks.get('channel_info'):
         info = checks['channel_info']
@@ -1076,20 +1142,14 @@ if __name__ == "__main__":
         if key in checks:
             print(f"\n❌ {key}: {checks[key]}")
 
-    # Ready for uploads?
-    all_ok = all([
-        checks['libraries_installed'],
-        checks['config_enabled'],
-        checks['client_secrets_exists'],
-        checks['token_exists'],
-        checks['credentials_valid'],
-        checks['client_working'],
-        checks['channel_accessible'],
-    ])
+    # Ready for uploads? Channel accessibility is optional in upload-only mode.
+    all_ok = checks.get('upload_ready', False) and (
+        checks.get('channel_check_optional') or checks.get('channel_accessible')
+    )
 
     print("\n" + "═" * 60)
     if all_ok:
-        print("🎉 ALL CHECKS PASSED — Ready for uploads!")
+        print("🎉 UPLOAD CHECKS PASSED — Ready for YouTube uploads!")
         print("═" * 60)
         print("\n📝 Add to GitHub secrets:")
         print(f"   YOUTUBE_TOKEN_JSON = [content of {token_path.name}]")

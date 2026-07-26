@@ -407,6 +407,34 @@ def _check_duplicate(image_bytes: bytes) -> Tuple[int, list, dict]:
 # AI-BASED CONTENT VALIDATION (Gemini Vision)
 # ============================================================
 
+def _extract_response_text(response) -> str:
+    """Safely extract text from Gemini responses (single or multi-part)."""
+    try:
+        text = response.text.strip()
+        if text:
+            return text
+    except Exception:
+        pass
+
+    try:
+        candidates = getattr(response, "candidates", []) or []
+        texts = []
+        for candidate in candidates:
+            content = getattr(candidate, "content", None)
+            parts = getattr(content, "parts", []) or []
+            for part in parts:
+                part_text = getattr(part, "text", "")
+                if part_text:
+                    texts.append(part_text)
+        combined = "\n".join(texts).strip()
+        if combined:
+            return combined
+    except Exception:
+        pass
+
+    raise Exception("Cannot extract response text")
+
+
 def _ai_content_check(image_bytes: bytes, expected_topic: str) -> Tuple[int, list, dict]:
     """
     Use Gemini Vision to check if image matches the topic
@@ -434,6 +462,11 @@ def _ai_content_check(image_bytes: bytes, expected_topic: str) -> Tuple[int, lis
 
 Expected topic: {expected_topic}
 
+Important: Ignore our intentional brand watermark/handle if visible, especially
+"@sanatanii_soch", "sanatanii_soch", "सनातनी सोच", diagonal/corner/center
+brand protection text. Count has_text_watermark=true ONLY for unwanted AI text,
+garbled letters, random captions, logos, or unrelated watermarks.
+
 Return this exact JSON format:
 {{
     "matches_topic": true/false,
@@ -453,11 +486,15 @@ Only return JSON, no other text."""
         ])
 
         # Parse response
-        raw = response.text.strip()
+        raw = _extract_response_text(response)
 
-        # Clean JSON
+        # Clean/extract JSON
         import re
         raw = re.sub(r'```json\s*|\s*```', '', raw).strip()
+        start = raw.find('{')
+        end = raw.rfind('}')
+        if start != -1 and end != -1 and end > start:
+            raw = raw[start:end + 1]
 
         import json
         result = json.loads(raw)

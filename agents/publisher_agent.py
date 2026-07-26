@@ -332,29 +332,29 @@ def post_to_facebook(image_url: str, caption: str) -> dict:
 # ============================================================
 
 def _prepare_caption(caption: str, hashtags: str, post_type: str = "image") -> str:
-    """V4: SEO-optimized caption with proper spacing"""
+    """V4: SEO-optimized caption with proper spacing, without duplicate CTAs."""
 
-    # V4: Add follow CTA before hashtags
-    follow_cta = "\n\n📿 Follow @sanatanii_soch for daily भक्ति content\n🔔 Like + Comment + Share = भगवान की कृपा 🙏"
+    caption = (caption or "").strip()
+    hashtags = (hashtags or "").strip()
 
-    separator = "\n\n.\n.\n.\n\n"
-    full_caption = f"{caption}{follow_cta}{separator}{hashtags}"
+    # Add follow CTA only if caption doesn't already contain the handle/CTA.
+    caption_lower = caption.lower()
+    if "@sanatanii_soch" in caption_lower or "sanatanii_soch" in caption_lower:
+        follow_cta = ""
+    else:
+        follow_cta = "\n\n📿 Follow @sanatanii_soch for daily भक्ति content\n🔔 Like + Comment + Share = भगवान की कृपा 🙏"
+
+    separator = "\n\n.\n.\n.\n\n" if hashtags else ""
+    full_caption = f"{caption}{follow_cta}{separator}{hashtags}".strip()
 
     if len(full_caption) > MAX_CAPTION_LENGTH:
         available = MAX_CAPTION_LENGTH - len(hashtags) - len(separator) - len(follow_cta) - 3
         if available > 100:
-            full_caption = f"{caption[:available]}...{follow_cta}{separator}{hashtags}"
+            full_caption = f"{caption[:available]}...{follow_cta}{separator}{hashtags}".strip()
         else:
             full_caption = full_caption[:MAX_CAPTION_LENGTH - 3] + "..."
         logger.warning(f"⚠️  Caption छोटा किया गया: {len(full_caption)} chars")
-    return full_caption
-    if len(full_caption) > MAX_CAPTION_LENGTH:
-        available = MAX_CAPTION_LENGTH - len(hashtags) - len(separator) - 3
-        if available > 100:
-            full_caption = f"{caption[:available]}...{separator}{hashtags}"
-        else:
-            full_caption = full_caption[:MAX_CAPTION_LENGTH - 3] + "..."
-        logger.warning(f"⚠️  Caption छोटा किया गया: {len(full_caption)} chars")
+
     return full_caption
 
 
@@ -1383,31 +1383,37 @@ def run(memory: AgentMemory) -> AgentMemory:
 
                 _human_like_delay(30, 60, "YouTube से पहले wait")
 
-             # 🆕 V3: SEO-optimized YouTube upload
-                try:
-                    from posting.youtube import (
-                        _generate_seo_title,
-                        _generate_seo_description,
-                        _generate_seo_tags
-                    )
+                # 🆕 V4: SEO-optimized YouTube upload.
+                # Prefer seo_agent output (already paid/generated) and fallback to local templates.
+                seo_data = (memory.analytics_data or {}).get("seo", {}).get("youtube", {})
+                if seo_data.get("title") and seo_data.get("description"):
+                    yt_title = seo_data["title"]
+                    yt_description = seo_data["description"]
+                    logger.info("🎯 Using SEO agent YouTube metadata")
+                else:
+                    try:
+                        from posting.youtube import (
+                            _generate_seo_title,
+                            _generate_seo_description,
+                        )
 
-                    yt_title = _generate_seo_title(
-                        topic=memory.topic,
-                        category=memory.category
-                    )
-                    yt_description = _generate_seo_description(
-                        topic=memory.topic,
-                        caption=memory.caption or "",
-                        category=memory.category,
-                        hashtags=memory.hashtags or ""
-                    )
+                        yt_title = _generate_seo_title(
+                            topic=memory.topic,
+                            category=memory.category
+                        )
+                        yt_description = _generate_seo_description(
+                            topic=memory.topic,
+                            caption=memory.caption or "",
+                            category=memory.category,
+                            hashtags=memory.hashtags or ""
+                        )
 
-                    logger.info(f"🎯 YT SEO Title: {yt_title[:60]}...")
+                    except ImportError:
+                        # Fallback if SEO functions not available
+                        yt_title = memory.topic[:90] if memory.topic else "Spiritual Content"
+                        yt_description = memory.caption or ""
 
-                except ImportError:
-                    # Fallback if SEO functions not available
-                    yt_title = memory.topic[:90] if memory.topic else "Spiritual Content"
-                    yt_description = memory.caption or ""
+                logger.info(f"🎯 YT SEO Title: {yt_title[:60]}...")
 
                 yt_result = post_reel_to_youtube(
                     video_bytes=memory.reel_video_bytes,

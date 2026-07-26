@@ -530,6 +530,235 @@ def _log_pipeline_summary(report: dict):
 # 🆕 RECOVERY CHECK
 # ============================================================
 
+def _hydrate_reel_publish_status_from_db(memory: AgentMemory) -> AgentMemory:
+    """
+    If an older checkpoint failed to save after publishing, recover IG/FB/YT
+    status from post_history so `python main.py recover` does not repost the
+    same reel to platforms that already succeeded.
+    """
+    try:
+        if getattr(memory, "post_type", "") != "reel":
+            return memory
+
+        if not memory.topic:
+            return memory
+
+        from core.database import initialize_database, get_connection
+
+        initialize_database()
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT ig_post_id, fb_post_id, yt_post_id,
+                   ig_success, fb_success, yt_success, video_url
+            FROM post_history
+            WHERE post_type = 'reel'
+              AND topic = ?
+              AND category = ?
+              AND datetime(created_at) >= datetime('now', '-36 hours')
+            ORDER BY datetime(created_at) DESC, id DESC
+            LIMIT 1
+        """, (memory.topic, memory.category))
+        row = cursor.fetchone()
+        conn.close()
+
+        if not row:
+            return memory
+
+        ig_post_id, fb_post_id, yt_video_id, ig_success, fb_success, yt_success, video_url = row
+
+        if not any([ig_success, fb_success, yt_success]):
+            return memory
+
+        logger.warning(
+            "♻️  DB से reel publish status restore किया — duplicate repost से बचाया"
+        )
+
+        if ig_success:
+            memory.reel_ig_success = True
+            memory.ig_success = True
+            memory.reel_ig_post_id = ig_post_id or memory.reel_ig_post_id
+            memory.ig_post_id = memory.reel_ig_post_id
+
+        if fb_success:
+            memory.reel_fb_success = True
+            memory.fb_success = True
+            memory.reel_fb_post_id = fb_post_id or memory.reel_fb_post_id
+            memory.fb_post_id = memory.reel_fb_post_id
+
+        if yt_success:
+            memory.reel_yt_success = True
+            memory.reel_yt_video_id = yt_video_id or memory.reel_yt_video_id
+
+        if video_url and not memory.reel_video_url:
+            memory.reel_video_url = video_url
+
+    except Exception as e:
+        logger.warning(f"⚠️  DB से reel publish status restore नहीं हुआ: {e}")
+
+    return memory
+
+
+def _get_reel_recovery_slides_bytes(memory: AgentMemory) -> dict:
+    """Build the slides_bytes map expected by reel_engine recovery."""
+    slides_bytes = {}
+    try:
+        for scene in memory.reel_scenes or []:
+            scene_num = scene.get("scene_number")
+            image_bytes = scene.get("image_bytes")
+            if scene_num and image_bytes:
+                slides_bytes[f"reel_scene_{scene_num}"] = image_bytes
+    except Exception:
+        pass
+    return slides_bytes
+
+
+def _recover_latest_failed_youtube_reel_from_db() -> Optional[dict]:
+    """
+    Fallback recovery when logs/recovery is missing.
+
+    Scenario: IG + FB posted successfully, YouTube failed, but checkpoint JSON
+    could not be updated. In that case DB still has video_url + yt_success=0.
+    This uploads ONLY to YouTube from the saved GCS video URL; it never reposts
+    to Instagram/Facebook.
+    """
+    try:
+        from config.settings import YOUTUBE_ENABLED
+
+        if not YOUTUBE_ENABLED:
+            logger.info("⏭️  YouTube disabled — DB fallback recovery skip")
+            return None
+
+        from core.database import initialize_database, get_connection
+
+        initialize_database()
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT id, topic, category, caption, hashtags,
+                   video_url, reel_duration_seconds, created_at
+            FROM post_history
+            WHERE post_type = 'reel'
+              AND COALESCE(yt_success, 0) = 0
+              AND COALESCE(video_url, '') != ''
+              AND (COALESCE(ig_success, 0) = 1 OR COALESCE(fb_success, 0) = 1)
+            ORDER BY datetime(created_at) DESC, id DESC
+            LIMIT 1
+        """)
+        row = cursor.fetchone()
+        conn.close()
+
+        if not row:
+            return None
+
+        post_id, topic, category, caption, hashtags, video_url, reel_duration, created_at = row
+
+        logger.info("")
+        logger.info("╔══════════════════════════════════════════════╗")
+        logger.info("║   📺 DB से YouTube pending reel मिली          ║")
+        logger.info("╠══════════════════════════════════════════════╣")
+        logger.info(f"║ DB ID     : {post_id}")
+        logger.info(f"║ Topic     : {(topic or '')[:38]}")
+        logger.info(f"║ Category  : {category or 'unknown'}")
+        logger.info(f"║ Duration  : {reel_duration or 0}s")
+        logger.info(f"║ Created   : {created_at}")
+        logger.info("╚══════════════════════════════════════════════╝")
+        logger.info("📺 सिर्फ YouTube upload retry होगा — IG/FB touch नहीं होंगे ✅")
+
+        # Download video from public GCS URL.
+        import requests
+
+        logger.info(f"⬇️  Downloading video from GCS: {str(video_url)[:80]}...")
+        response = requests.get(video_url, timeout=(15, 180), stream=True)
+        response.raise_for_status()
+
+        chunks = []
+        total = 0
+        max_bytes = 512 * 1024 * 1024  # Safety guard: 512 MB
+        for chunk in response.iter_content(chunk_size=1024 * 1024):
+            if not chunk:
+                continue
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > max_bytes:
+                raise Exception("Video download too large (>512 MB)")
+
+        video_bytes = b"".join(chunks)
+        if len(video_bytes) < 100_000:
+            raise Exception(f"Downloaded video too small: {len(video_bytes)} bytes")
+
+        logger.info(f"✅ Video downloaded: {len(video_bytes) / (1024 * 1024):.2f} MB")
+
+        # Build YouTube SEO metadata.
+        try:
+            from posting.youtube import _generate_seo_title, _generate_seo_description
+
+            yt_title = _generate_seo_title(topic=topic or "Spiritual Content", category=category or "")
+            yt_description = _generate_seo_description(
+                topic=topic or "Spiritual Content",
+                caption=caption or "",
+                category=category or "",
+                hashtags=hashtags or ""
+            )
+        except Exception as e:
+            logger.warning(f"⚠️  YT SEO metadata fallback use होगा: {e}")
+            yt_title = (topic or "Spiritual Content")[:90]
+            yt_description = caption or ""
+
+        logger.info(f"🎯 YT Title: {yt_title[:70]}...")
+
+        # Upload ONLY to YouTube.
+        yt_result = publisher_agent.post_reel_to_youtube(
+            video_bytes=video_bytes,
+            title=yt_title,
+            description=yt_description,
+            hashtags=hashtags or ""
+        )
+
+        if yt_result.get("success"):
+            video_id = yt_result.get("video_id", "")
+            conn = get_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE post_history
+                SET yt_post_id = ?, yt_success = 1
+                WHERE id = ?
+            """, (video_id, post_id))
+            conn.commit()
+            conn.close()
+
+            logger.info(f"🎉 DB fallback YouTube upload सफल: {video_id}")
+            return {
+                "status": "success",
+                "post_type": "reel",
+                "recovery_source": "db_youtube_fallback",
+                "post_db_id": post_id,
+                "topic": topic or "",
+                "yt_video_id": video_id,
+                "yt_url": yt_result.get("shorts_url") or yt_result.get("url", ""),
+            }
+
+        error = yt_result.get("error", "YouTube upload failed")
+        logger.error(f"❌ DB fallback YouTube upload विफल: {error}")
+        return {
+            "status": "failed",
+            "post_type": "reel",
+            "recovery_source": "db_youtube_fallback",
+            "post_db_id": post_id,
+            "topic": topic or "",
+            "message": error,
+        }
+
+    except Exception as e:
+        logger.error(f"❌ DB YouTube fallback recovery failed: {e}")
+        return {
+            "status": "error",
+            "post_type": "reel",
+            "recovery_source": "db_youtube_fallback",
+            "message": str(e),
+        }
+
+
 def _check_and_load_recovery(post_type: str = "carousel") -> Optional[AgentMemory]:
     """
     पुराने अधूरे session को detect करो और memory में load करो।
@@ -560,6 +789,9 @@ def _check_and_load_recovery(post_type: str = "carousel") -> Optional[AgentMemor
         state=state,
         slides_bytes=state.get("slides_bytes", {})
     )
+
+    if post_type == "reel":
+        memory = _hydrate_reel_publish_status_from_db(memory)
 
     logger.info(f"♻️  पुराने डेटा से आगे बढ़ रहे हैं...")
     logger.info(f"    Session: {memory.session_id}")
@@ -1097,7 +1329,7 @@ def run_reel_pipeline(force_new: bool = False) -> dict:
                 resume_state=None if not memory.is_recovery else {
                     "stage": memory.resumed_from_stage,
                     "data": memory.to_recovery_dict(),
-                    "slides_bytes": {},
+                    "slides_bytes": _get_reel_recovery_slides_bytes(memory),
                     "voice_bytes": memory.reel_voice_bytes,
                     "subtitle_srt": memory.reel_subtitle_srt,
                 }
@@ -1119,6 +1351,13 @@ def run_reel_pipeline(force_new: bool = False) -> dict:
             memory.reel_duration_seconds = reel_result.get("duration", memory.reel_duration_seconds)
             memory.reel_video_size_mb = reel_result.get("size_mb", memory.reel_video_size_mb)
             memory.reel_music_file = reel_result.get("music_file", memory.reel_music_file)
+            memory.reel_thumbnail_url = reel_result.get("thumbnail_url", memory.reel_thumbnail_url)
+            memory.reel_thumbnail_bytes = reel_result.get("thumbnail_bytes", memory.reel_thumbnail_bytes)
+            memory.reel_thumbnail_path = reel_result.get("thumbnail_path", memory.reel_thumbnail_path)
+            memory.reel_thumbnail_title = reel_result.get("thumbnail_title", memory.reel_thumbnail_title)
+            memory.reel_thumbnail_ai_generated = reel_result.get("thumbnail_ai_generated", memory.reel_thumbnail_ai_generated)
+            memory.reel_thumbnail_provider = reel_result.get("thumbnail_provider", memory.reel_thumbnail_provider)
+            memory.reel_cta_card_duration = reel_result.get("cta_card_duration", memory.reel_cta_card_duration)
 
             fake_result = AgentExecutionResult("reel_engine")
             fake_result.success = True
@@ -1175,7 +1414,17 @@ def run_reel_pipeline(force_new: bool = False) -> dict:
         agent_results["caption"] = result
 
         # ═══════════════════════════════════════════
-        # 🆕 STEP 5.5: SEO AGENT (optimize for all platforms)
+        # STEP 6: HASHTAG (existing agent, reel-aware)
+        # Run before SEO so YouTube/FB descriptions include final hashtags.
+        # ═══════════════════════════════════════════
+        memory, result = _execute_agent(
+            "hashtag", hashtag_agent.run, memory,
+            critical=False, max_retries=1
+        )
+        agent_results["hashtag"] = result
+
+        # ═══════════════════════════════════════════
+        # 🆕 STEP 6.5: SEO AGENT (optimize for all platforms)
         # ═══════════════════════════════════════════
         try:
             from agents.seo_agent import run as run_seo
@@ -1186,15 +1435,6 @@ def run_reel_pipeline(force_new: bool = False) -> dict:
             agent_results["seo"] = result
         except ImportError:
             logger.warning("⚠️  SEO agent not available")
-
-        # ═══════════════════════════════════════════
-        # STEP 6: HASHTAG (existing agent, reel-aware)
-        # ═══════════════════════════════════════════
-        memory, result = _execute_agent(
-            "hashtag", hashtag_agent.run, memory,
-            critical=False, max_retries=1
-        )
-        agent_results["hashtag"] = result
 
         # ═══════════════════════════════════════════
         # STEP 7: PUBLISHER (extended for reels)
@@ -1233,7 +1473,7 @@ def run_reel_pipeline(force_new: bool = False) -> dict:
                 "yt_post_id":             memory.reel_yt_video_id,
                 "yt_success":             memory.reel_yt_success,
                 "reel_duration_seconds":  memory.reel_duration_seconds,
-                "reel_scenes_count":      len(memory.reel_scenes)
+                "reel_scenes_count":      sum(1 for s in memory.reel_scenes if not s.get("is_thumbnail_card"))
             })
             memory.post_id = post_db_id
             log_success(logger, f"Reel DB में save (ID: {post_db_id})")
@@ -1290,7 +1530,18 @@ def run_reel_pipeline(force_new: bool = False) -> dict:
         logger.info(f"📂 श्रेणी     : {memory.category}")
         logger.info(f"🎬 Video      : {memory.reel_duration_seconds}s, {memory.reel_video_size_mb}MB")
         logger.info(f"🎵 Music      : {memory.reel_music_file or 'None'}")
-        logger.info(f"🖼️  Scenes    : {len(memory.reel_scenes)}")
+        story_scene_count = sum(1 for s in memory.reel_scenes if not s.get("is_thumbnail_card"))
+        thumbnail_scene_count = sum(1 for s in memory.reel_scenes if s.get("is_thumbnail_card"))
+        logger.info(f"🖼️  Scenes    : {story_scene_count}")
+        if thumbnail_scene_count:
+            thumb_source = (
+                f"AI via {memory.reel_thumbnail_provider}"
+                if memory.reel_thumbnail_ai_generated else "local fallback"
+            )
+            logger.info(
+                f"🖼️  CTA card  : {thumbnail_scene_count} "
+                f"({memory.reel_cta_card_duration:.1f}s, {thumb_source})"
+            )
         logger.info("")
         logger.info("📱 PUBLISHING:")
         logger.info(
@@ -1452,6 +1703,11 @@ def run_recovery_only() -> dict:
                 "post_type": "carousel",
                 "message": str(e)
             }
+
+    # Last fallback: checkpoint missing but DB says latest reel still needs YouTube.
+    yt_db_recovery = _recover_latest_failed_youtube_reel_from_db()
+    if yt_db_recovery is not None:
+        return yt_db_recovery
 
     # No recovery found
     logger.info("✅ कोई pending recovery नहीं")
@@ -1780,6 +2036,25 @@ def _run_cli():
             display_schedule()
             return
 
+        # ── YOUTUBE-ONLY RECOVERY FROM DB ─────────────────────
+        elif command in ["youtube-recover", "yt-recover"]:
+            logger.info("📺 YOUTUBE-ONLY DB RECOVERY MODE")
+            result = _recover_latest_failed_youtube_reel_from_db()
+
+            if result is None:
+                print("\n✅ DB में कोई pending YouTube reel नहीं मिली")
+                sys.exit(0)
+
+            status = result.get('status', 'unknown')
+            if status == "success":
+                print("\n✅ YouTube recovery पूर्ण!")
+                if result.get("yt_video_id"):
+                    print(f"📺 YT: https://youtube.com/shorts/{result['yt_video_id']}")
+            else:
+                print(f"\n❌ {result.get('message', 'YouTube recovery विफल')}")
+
+            sys.exit(0 if status == "success" else 2)
+
         # ── RECOVERY ONLY ─────────────────────────────────────
         elif command == "recover":
             logger.info("♻️  RECOVERY ONLY MODE")
@@ -1906,6 +2181,7 @@ def _run_cli():
 ║                                                   ║
 ║  RECOVERY COMMANDS:                               ║
 ║  python main.py recover        → Complete pending ║
+║  python main.py youtube-recover → Retry YT only   ║
 ║  python main.py recovery-stats → Show status      ║
 ║  python main.py recovery-cleanup → Clean old      ║
 ║                                                   ║
@@ -1926,7 +2202,13 @@ def _run_cli():
             """)
             return
 
-    # Default: Single image
+        # ── UNKNOWN COMMAND ──────────────────────────────────
+        else:
+            print(f"\n❌ Unknown command: {command}")
+            print("💡 Run: python main.py help")
+            sys.exit(2)
+
+    # Default with no CLI command: Single image
     result = run_pipeline()
 
     if result["status"] == "success":
