@@ -47,6 +47,7 @@ from video_engine.clip_renderer import render_all_scenes
 from video_engine.effects import apply_all_effects
 from video_engine.music_manager import mix_voice_with_music
 from video_engine.concat_engine import build_final_video
+from video_engine.thumbnail_card import generate_thumbnail_card
 
 logger = get_logger("video_builder")
 
@@ -109,6 +110,103 @@ def _read_video_bytes(video_path: str) -> bytes:
         return f.read()
 
 
+def _ensure_thumbnail_card(memory: AgentMemory) -> AgentMemory:
+    """Generate local branded thumbnail/CTA card if not already present."""
+    if getattr(memory, "reel_thumbnail_bytes", None):
+        return memory
+
+    try:
+        card = generate_thumbnail_card(
+            topic=memory.topic,
+            category=memory.category,
+            session_id=memory.session_id,
+        )
+        memory.reel_thumbnail_bytes = card["bytes"]
+        memory.reel_thumbnail_path = card["path"]
+        memory.reel_thumbnail_title = card["title"]
+    except Exception as e:
+        logger.warning(f"⚠️  Branded thumbnail card generation failed: {e}")
+
+    return memory
+
+
+def _add_thumbnail_cta_card_scene(memory: AgentMemory) -> AgentMemory:
+    """
+    Add the branded thumbnail card as an end-card scene.
+
+    The card duration is adjustable and usually replaces part of the last CTA
+    scene, so the total video length stays balanced while the thumbnail/handles
+    are visible in the video. Audio is later padded to this final target.
+    """
+    if not getattr(memory, "reel_thumbnail_bytes", None):
+        return memory
+
+    if not memory.reel_scenes:
+        return memory
+
+    # Avoid duplicate card in recovery/rebuild.
+    if any(s.get("scene_type") == "thumbnail_cta" for s in memory.reel_scenes):
+        return memory
+
+    base_total = sum(float(s.get("duration_seconds", 0) or 0) for s in memory.reel_scenes)
+    voice_target = float(memory.reel_voice_duration or 0) + 0.5  # same padding philosophy as music_manager
+
+    # Default visible end-card duration. If voice is longer than visuals, use
+    # the gap (capped) to fill it. If visuals are already longer, replace part
+    # of the last scene to keep total duration stable.
+    min_card = 1.2
+    default_card = 2.0
+    max_card = 4.0
+
+    if voice_target > base_total:
+        card_duration = max(min_card, min(max_card, voice_target - base_total))
+        reduce_last = 0.0
+    else:
+        card_duration = default_card
+        reduce_last = card_duration
+
+    # Take duration from the last normal scene when possible, keeping it readable.
+    if reduce_last > 0:
+        for scene in reversed(memory.reel_scenes):
+            if scene.get("scene_type") != "thumbnail_cta":
+                old_duration = float(scene.get("duration_seconds", 0) or 0)
+                min_last_scene = 3.0
+                actual_reduce = min(reduce_last, max(0.0, old_duration - min_last_scene))
+                if actual_reduce > 0:
+                    scene["duration_seconds"] = round(old_duration - actual_reduce, 2)
+                    card_duration = round(actual_reduce, 2)
+                    logger.info(
+                        f"🖼️  CTA card duration balanced: last scene "
+                        f"{old_duration:.1f}s → {scene['duration_seconds']:.1f}s, "
+                        f"card={card_duration:.1f}s"
+                    )
+                break
+
+    if card_duration < min_card:
+        card_duration = min_card
+
+    card_scene = {
+        "scene_number": len(memory.reel_scenes) + 1,
+        "scene_type": "thumbnail_cta",
+        "narration": "",
+        "visual_description": "Branded thumbnail CTA card with title and social handles",
+        "image_bytes": memory.reel_thumbnail_bytes,
+        "duration_seconds": round(card_duration, 2),
+        "effect": "static",
+        "is_thumbnail_card": True,
+    }
+    memory.reel_scenes.append(card_scene)
+    memory.reel_cta_card_duration = round(card_duration, 2)
+
+    final_total = sum(float(s.get("duration_seconds", 0) or 0) for s in memory.reel_scenes)
+    logger.info(
+        f"🖼️  Branded thumbnail CTA card added: {card_duration:.1f}s | "
+        f"final visual target: {final_total:.1f}s"
+    )
+
+    return memory
+
+
 # ============================================================
 # MAIN BUILD FUNCTION
 # ============================================================
@@ -162,6 +260,10 @@ def build_video(memory: AgentMemory) -> AgentMemory:
         logger.info("⏭️  Video already built (recovery), skipping")
         return memory
 
+    # Generate/append branded thumbnail CTA card before rendering.
+    memory = _ensure_thumbnail_card(memory)
+    memory = _add_thumbnail_cta_card_scene(memory)
+
     # Validate scenes
     is_valid, reason = _validate_scenes(memory.reel_scenes)
     if not is_valid:
@@ -169,9 +271,11 @@ def build_video(memory: AgentMemory) -> AgentMemory:
         memory.add_error("video_builder", f"Scene validation: {reason}")
         return memory
 
+    final_visual_duration = sum(float(s.get('duration_seconds', 0) or 0) for s in memory.reel_scenes)
+
     logger.info(f"✅ Scene validation: {reason}")
     logger.info(f"🎬 Total scenes: {len(memory.reel_scenes)}")
-    logger.info(f"⏱️  Target duration: {sum(s.get('duration_seconds', 0) for s in memory.reel_scenes)}s")
+    logger.info(f"⏱️  Target duration: {final_visual_duration}s")
 
     # ═══════════════════════════════════════════
     # STEP 1: RENDER SCENES TO CLIPS
@@ -234,6 +338,7 @@ def build_video(memory: AgentMemory) -> AgentMemory:
                 voice_duration=memory.reel_voice_duration,
                 category=memory.category,
                 mood=memory.mood,
+                target_duration=final_visual_duration,
             )
 
             if music_file_used:

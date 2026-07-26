@@ -1351,6 +1351,11 @@ def run_reel_pipeline(force_new: bool = False) -> dict:
             memory.reel_duration_seconds = reel_result.get("duration", memory.reel_duration_seconds)
             memory.reel_video_size_mb = reel_result.get("size_mb", memory.reel_video_size_mb)
             memory.reel_music_file = reel_result.get("music_file", memory.reel_music_file)
+            memory.reel_thumbnail_url = reel_result.get("thumbnail_url", memory.reel_thumbnail_url)
+            memory.reel_thumbnail_bytes = reel_result.get("thumbnail_bytes", memory.reel_thumbnail_bytes)
+            memory.reel_thumbnail_path = reel_result.get("thumbnail_path", memory.reel_thumbnail_path)
+            memory.reel_thumbnail_title = reel_result.get("thumbnail_title", memory.reel_thumbnail_title)
+            memory.reel_cta_card_duration = reel_result.get("cta_card_duration", memory.reel_cta_card_duration)
 
             fake_result = AgentExecutionResult("reel_engine")
             fake_result.success = True
@@ -1466,7 +1471,7 @@ def run_reel_pipeline(force_new: bool = False) -> dict:
                 "yt_post_id":             memory.reel_yt_video_id,
                 "yt_success":             memory.reel_yt_success,
                 "reel_duration_seconds":  memory.reel_duration_seconds,
-                "reel_scenes_count":      len(memory.reel_scenes)
+                "reel_scenes_count":      sum(1 for s in memory.reel_scenes if not s.get("is_thumbnail_card"))
             })
             memory.post_id = post_db_id
             log_success(logger, f"Reel DB में save (ID: {post_db_id})")
@@ -1523,7 +1528,11 @@ def run_reel_pipeline(force_new: bool = False) -> dict:
         logger.info(f"📂 श्रेणी     : {memory.category}")
         logger.info(f"🎬 Video      : {memory.reel_duration_seconds}s, {memory.reel_video_size_mb}MB")
         logger.info(f"🎵 Music      : {memory.reel_music_file or 'None'}")
-        logger.info(f"🖼️  Scenes    : {len(memory.reel_scenes)}")
+        story_scene_count = sum(1 for s in memory.reel_scenes if not s.get("is_thumbnail_card"))
+        thumbnail_scene_count = sum(1 for s in memory.reel_scenes if s.get("is_thumbnail_card"))
+        logger.info(f"🖼️  Scenes    : {story_scene_count}")
+        if thumbnail_scene_count:
+            logger.info(f"🖼️  CTA card  : {thumbnail_scene_count} ({memory.reel_cta_card_duration:.1f}s)")
         logger.info("")
         logger.info("📱 PUBLISHING:")
         logger.info(

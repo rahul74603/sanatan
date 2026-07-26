@@ -74,6 +74,7 @@ from video_engine import (
     subtitle_generator,
     video_builder,
 )
+from video_engine.thumbnail_card import generate_thumbnail_card
 
 logger = get_logger("reel_engine")
 
@@ -147,6 +148,31 @@ def _check_stage_needed(memory: AgentMemory, field: str, stage_name: str) -> boo
         return False
 
     return True
+
+
+def _prebuild_branded_thumbnail_card(memory: AgentMemory) -> AgentMemory:
+    """
+    Create a no-cost branded thumbnail/CTA card right after topic selection.
+    This is later used both as reel cover and as an adjustable end-card scene.
+    """
+    if getattr(memory, "reel_thumbnail_bytes", None):
+        return memory
+
+    try:
+        logger.info("🖼️  Prebuilding branded thumbnail/CTA card from topic...")
+        card = generate_thumbnail_card(
+            topic=memory.topic,
+            category=memory.category,
+            session_id=memory.session_id,
+        )
+        memory.reel_thumbnail_bytes = card["bytes"]
+        memory.reel_thumbnail_path = card["path"]
+        memory.reel_thumbnail_title = card["title"]
+        logger.info("✅ Branded thumbnail/CTA card ready")
+    except Exception as e:
+        logger.warning(f"⚠️  Branded thumbnail card prebuild failed: {e}")
+
+    return memory
 
 
 def _cleanup_temp_files(memory: AgentMemory):
@@ -678,6 +704,36 @@ def _run_stage_thumbnail(memory: AgentMemory) -> AgentMemory:
     logger.info(f"━━━ 🖼️  Thumbnail Generate करना ━━━")
 
     try:
+        # Prefer the no-cost branded thumbnail/CTA card generated before video build.
+        if getattr(memory, "reel_thumbnail_bytes", None):
+            thumb_bytes = memory.reel_thumbnail_bytes
+            thumb_path = Path(memory.reel_thumbnail_path or f"logs/thumbnails/thumb_card_{memory.session_id}.jpg")
+            thumb_path.parent.mkdir(parents=True, exist_ok=True)
+            if not thumb_path.exists():
+                with open(thumb_path, 'wb') as f:
+                    f.write(thumb_bytes)
+
+            logger.info(f"✅ Using branded thumbnail card: {len(thumb_bytes):,} bytes")
+            logger.info(f"   📁 Path: {thumb_path}")
+            if getattr(memory, "reel_thumbnail_title", ""):
+                logger.info(f"   📝 Title: {memory.reel_thumbnail_title}")
+
+            try:
+                from utils.gcs_helper import upload_image
+                thumb_url = upload_image(
+                    thumb_bytes,
+                    folder="thumbnails",
+                    metadata={"session_id": memory.session_id, "type": "branded_card"}
+                )
+                memory.reel_thumbnail_url = thumb_url
+                logger.info(f"   ☁️  Uploaded: {thumb_url[:60]}...")
+            except Exception as e:
+                logger.warning(f"   ⚠️  Thumbnail upload failed: {e}")
+
+            elapsed = round(time.time() - start, 2)
+            logger.info(f"✅ Thumbnail done ({elapsed}s)")
+            return memory
+
         if not memory.reel_scenes:
             logger.warning("⚠️  No scenes, skipping thumbnail")
             return memory
@@ -965,9 +1021,12 @@ def _validate_final_reel(memory: AgentMemory) -> dict:
 
 def _calculate_costs(memory: AgentMemory) -> dict:
     """Calculate approximate costs for this reel"""
-    num_images = len(memory.reel_scenes) if memory.reel_scenes else 0
+    num_images = sum(
+        1 for s in (memory.reel_scenes or [])
+        if not s.get("is_thumbnail_card")
+    )
 
-    # Estimate: ₹1 average per image (mix of paid + free fallbacks)
+    # Estimate: ₹1 average per AI-generated image (thumbnail card is local/free)
     image_cost = num_images * 1.0
 
     # TTS: ~₹0.50 per 500 chars
@@ -1063,6 +1122,23 @@ def _load_recovery_state(memory: AgentMemory, resume_state: dict) -> AgentMemory
     if state_data.get("reel_music_file"):
         memory.reel_music_file = state_data["reel_music_file"]
 
+    # Thumbnail / CTA card metadata
+    if state_data.get("reel_thumbnail_url"):
+        memory.reel_thumbnail_url = state_data["reel_thumbnail_url"]
+    if state_data.get("reel_thumbnail_path"):
+        memory.reel_thumbnail_path = state_data["reel_thumbnail_path"]
+        try:
+            if Path(memory.reel_thumbnail_path).exists():
+                with open(memory.reel_thumbnail_path, 'rb') as f:
+                    memory.reel_thumbnail_bytes = f.read()
+                logger.info(f"♻️  Thumbnail card loaded: {len(memory.reel_thumbnail_bytes):,} bytes")
+        except Exception as e:
+            logger.warning(f"⚠️  Failed to load thumbnail card: {e}")
+    if state_data.get("reel_thumbnail_title"):
+        memory.reel_thumbnail_title = state_data["reel_thumbnail_title"]
+    if state_data.get("reel_cta_card_duration"):
+        memory.reel_cta_card_duration = state_data["reel_cta_card_duration"]
+
     # Log restore summary
     logger.info(f"♻️  Resumed from: {memory.resumed_from_stage}")
     logger.info(f"   📖 Story       : {'✅' if memory.reel_story else '❌'}")
@@ -1137,6 +1213,9 @@ def build_reel(
         memory = _load_recovery_state(memory, resume_state)
         resumed_stage = memory.resumed_from_stage
 
+    # No-cost branded cover/CTA card is created as soon as topic is known.
+    memory = _prebuild_branded_thumbnail_card(memory)
+
     logger.info("═" * 55)
 
     # ═══════════════════════════════════════════
@@ -1185,8 +1264,10 @@ def build_reel(
         costs = _calculate_costs(memory)
 
         successful_scenes = sum(
-            1 for s in memory.reel_scenes if s.get("image_bytes")
+            1 for s in memory.reel_scenes
+            if s.get("image_bytes") and not s.get("is_thumbnail_card")
         )
+        thumbnail_card_added = any(s.get("is_thumbnail_card") for s in memory.reel_scenes)
 
         logger.info("")
         logger.info("═" * 55)
@@ -1196,6 +1277,8 @@ def build_reel(
         logger.info(f"📖 Story words    : {len(memory.reel_story.split())}")
         logger.info(f"✅ Fact checked   : {memory.reel_fact_checked}")
         logger.info(f"🖼️  Scenes         : {successful_scenes}/6")
+        if thumbnail_card_added:
+            logger.info(f"🖼️  Thumbnail card : Yes ({memory.reel_cta_card_duration:.1f}s, local/free)")
         logger.info(f"🎤 Voice          : {memory.reel_voice_duration:.1f}s ({memory.reel_voice_gender})")
         logger.info(f"📝 Subtitles      : {'Yes' if memory.reel_subtitle_srt else 'No'}")
         logger.info(f"🎬 Video          : {memory.reel_duration_seconds:.1f}s, {memory.reel_video_size_mb} MB")
@@ -1243,6 +1326,11 @@ def build_reel(
             "duration": memory.reel_duration_seconds,
             "size_mb": memory.reel_video_size_mb,
             "music_file": memory.reel_music_file,
+            "thumbnail_url": memory.reel_thumbnail_url,
+            "thumbnail_bytes": memory.reel_thumbnail_bytes,
+            "thumbnail_path": memory.reel_thumbnail_path,
+            "thumbnail_title": memory.reel_thumbnail_title,
+            "cta_card_duration": memory.reel_cta_card_duration,
             "build_time": total_time,
             "cost_inr": costs["total_inr"],
             "cost_breakdown": costs,

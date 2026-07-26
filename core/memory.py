@@ -160,6 +160,10 @@ class AgentMemory:
     # Metadata
     reel_music_file: str = ""                   # Which BG music track used
     reel_thumbnail_url: str = ""                # Custom thumbnail URL
+    reel_thumbnail_path: str = ""               # Local thumbnail/card path
+    reel_thumbnail_title: str = ""              # Title used on thumbnail card
+    reel_thumbnail_bytes: Optional[bytes] = None # Local PIL-generated card bytes
+    reel_cta_card_duration: float = 0.0         # CTA card duration inside video
 
     # ═══════════════════════════════════════════
     # RECOVERY HELPERS
@@ -348,6 +352,9 @@ class AgentMemory:
             "reel_yt_success":       self.reel_yt_success,
             "reel_music_file":       self.reel_music_file,
             "reel_thumbnail_url":    self.reel_thumbnail_url,
+            "reel_thumbnail_path":   self.reel_thumbnail_path,
+            "reel_thumbnail_title":  self.reel_thumbnail_title,
+            "reel_cta_card_duration": self.reel_cta_card_duration,
 
             "errors":              self.errors,
         }
@@ -420,6 +427,9 @@ class AgentMemory:
         self.reel_yt_success       = data.get("reel_yt_success", False)
         self.reel_music_file       = data.get("reel_music_file", "")
         self.reel_thumbnail_url    = data.get("reel_thumbnail_url", "")
+        self.reel_thumbnail_path   = data.get("reel_thumbnail_path", "")
+        self.reel_thumbnail_title  = data.get("reel_thumbnail_title", "")
+        self.reel_cta_card_duration = data.get("reel_cta_card_duration", 0.0)
 
         # 🆕 Restore reel scene image bytes
         for scene in self.reel_scenes:
@@ -475,7 +485,7 @@ class AgentMemory:
             "reel_fb_success":        self.reel_fb_success,
             "reel_yt_success":        self.reel_yt_success,
             "reel_yt_video_id":       self.reel_yt_video_id,
-            "reel_scenes_count":      len(self.reel_scenes),
+            "reel_scenes_count":      sum(1 for s in self.reel_scenes if not s.get("is_thumbnail_card")),
 
             "errors":              self.errors
         }
