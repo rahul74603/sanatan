@@ -379,7 +379,8 @@ def mix_voice_with_music(
     voice_bytes: bytes,
     voice_duration: float,
     category: str = "",
-    mood: str = ""
+    mood: str = "",
+    target_duration: float = 0.0
 ) -> Tuple[bytes, str]:
     """
     Mix TTS voice with BG music.
@@ -437,6 +438,24 @@ def mix_voice_with_music(
     voice_duration_ms = len(voice_audio)
     logger.info(f"🔧 Added {padding_ms}ms silence padding (MoviePy fix)")
     logger.info(f"✅ Padded voice duration: {voice_duration_ms/1000:.1f}s")
+
+    # Optional: pad voice to final video duration (CTA card / thumbnail card).
+    # This prevents concat_engine from trimming the video when an end-card is used.
+    if target_duration and target_duration > 0:
+        target_duration_ms = int(target_duration * 1000)
+        if target_duration_ms > voice_duration_ms:
+            extra_ms = target_duration_ms - voice_duration_ms
+            voice_audio = voice_audio + AudioSegment.silent(duration=extra_ms)
+            voice_duration_ms = len(voice_audio)
+            logger.info(
+                f"🔧 Extended audio with {extra_ms}ms silence for CTA card sync "
+                f"(target: {target_duration:.1f}s)"
+            )
+        else:
+            logger.info(
+                f"ℹ️  CTA target {target_duration:.1f}s <= voice duration; "
+                "no extra audio padding needed"
+            )
 
     # Select music file
     music_file = _select_music_file(category=category, mood=mood)
