@@ -69,14 +69,16 @@ logger = get_logger("youtube")
 YOUTUBE_UPLOAD_SCOPE = "https://www.googleapis.com/auth/youtube.upload"
 YOUTUBE_READONLY_SCOPE = "https://www.googleapis.com/auth/youtube.readonly"
 
-SCOPES = [
-    YOUTUBE_UPLOAD_SCOPE,
-    YOUTUBE_READONLY_SCOPE,
-]
+# Runtime uploads need ONLY youtube.upload. Keeping this minimal is important:
+# if code requests broader/different scopes than the saved refresh token was
+# granted, Google can reject refresh with `invalid_scope` after the first hour.
+SCOPES = [YOUTUBE_UPLOAD_SCOPE]
 
-# Emergency fallback for older tokens that were authorized for upload only.
-# This still allows the publishing pipeline to upload Shorts.
-UPLOAD_ONLY_SCOPES = [YOUTUBE_UPLOAD_SCOPE]
+# Backward-compatible alias used by refresh fallback.
+UPLOAD_ONLY_SCOPES = SCOPES
+
+# Optional scopes for manual diagnostics only. Do not use these during uploads.
+DIAGNOSTIC_SCOPES = [YOUTUBE_UPLOAD_SCOPE, YOUTUBE_READONLY_SCOPE]
 
 # YouTube Data API service
 API_SERVICE_NAME = "youtube"
@@ -132,6 +134,11 @@ def _load_credentials() -> Optional[Credentials]:
                 SCOPES
             )
             logger.info(f"✅ Loaded YouTube token from {token_path.name}")
+            logger.info(
+                f"🔐 YouTube scopes requested: {SCOPES} | "
+                f"token_scopes: {getattr(creds, 'scopes', None)} | "
+                f"expired: {getattr(creds, 'expired', None)}"
+            )
         except Exception as e:
             logger.warning(f"⚠️  Failed to load token: {e}")
             creds = None
@@ -278,11 +285,17 @@ def _initial_oauth_setup():
             SCOPES
         )
 
-        # Run local server to receive OAuth callback
+        # Run local server to receive OAuth callback.
+        # prompt='consent' + include_granted_scopes='false' ensures Google gives
+        # a fresh refresh token for EXACTLY youtube.upload, preventing the
+        # recurring `invalid_scope` refresh failure seen in scheduled runs.
         creds = flow.run_local_server(
             port=0,  # Use any available port
             success_message="✅ Authentication successful! You can close this window.",
-            open_browser=True
+            open_browser=True,
+            access_type='offline',
+            prompt='consent',
+            include_granted_scopes='false'
         )
 
         # Save token
