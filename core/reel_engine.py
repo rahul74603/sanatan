@@ -752,260 +752,51 @@ def _run_stage_video_watermark(memory: AgentMemory) -> AgentMemory:
 
 def _run_stage_thumbnail(memory: AgentMemory) -> AgentMemory:
     """
-    🆕 V4: Generate VIRAL-style thumbnail with BOLD hook text.
+    Thumbnail stage.
 
-    Creates eye-catching cover image:
-    - Scene 1 as background (darkened)
-    - BIG BOLD Hindi hook text (top)
-    - Gradient overlay (readable text)
-    - Brand name (bottom)
-    - Emoji for attention
+    We always use the BRAND-SAFE branded thumbnail/CTA card generated locally
+    in `_prebuild_branded_thumbnail_card` (topic-selection time). That card is
+    100% emoji-free (icons drawn as PIL shapes) so nothing tofu-boxes on the
+    server. If for some reason the branded card is missing, we generate it now
+    from scratch (no emoji, no scene-1 hack).
     """
     start = time.time()
     logger.info("")
-    logger.info(f"━━━ 🖼️  Thumbnail Generate करना ━━━")
+    logger.info("━━━ 🖼️  Thumbnail (branded, no-emoji) ━━━")
 
     try:
-        # Prefer the no-cost branded thumbnail/CTA card generated before video build.
-        if getattr(memory, "reel_thumbnail_bytes", None):
-            thumb_bytes = memory.reel_thumbnail_bytes
-            thumb_path = Path(memory.reel_thumbnail_path or f"logs/thumbnails/thumb_card_{memory.session_id}.jpg")
-            thumb_path.parent.mkdir(parents=True, exist_ok=True)
-            if not thumb_path.exists():
-                with open(thumb_path, 'wb') as f:
-                    f.write(thumb_bytes)
+        # Ensure branded card exists (safety net for recovery / weird states).
+        if not getattr(memory, "reel_thumbnail_bytes", None):
+            logger.info("ℹ️  Branded thumbnail bytes missing — regenerating (no-emoji)")
+            memory = _prebuild_branded_thumbnail_card(memory)
 
-            logger.info(f"✅ Using branded thumbnail card: {len(thumb_bytes):,} bytes")
-            logger.info(f"   📁 Path: {thumb_path}")
-            if getattr(memory, "reel_thumbnail_title", ""):
-                logger.info(f"   📝 Title: {memory.reel_thumbnail_title}")
-
-            try:
-                from utils.gcs_helper import upload_image
-                thumb_url = upload_image(
-                    thumb_bytes,
-                    folder="thumbnails",
-                    metadata={"session_id": memory.session_id, "type": "branded_card"}
-                )
-                memory.reel_thumbnail_url = thumb_url
-                logger.info(f"   ☁️  Uploaded: {thumb_url[:60]}...")
-            except Exception as e:
-                logger.warning(f"   ⚠️  Thumbnail upload failed: {e}")
-
-            elapsed = round(time.time() - start, 2)
-            logger.info(f"✅ Thumbnail done ({elapsed}s)")
+        if not getattr(memory, "reel_thumbnail_bytes", None):
+            logger.warning("⚠️  Branded thumbnail card unavailable, skipping thumbnail stage")
             return memory
 
-        if not memory.reel_scenes:
-            logger.warning("⚠️  No scenes, skipping thumbnail")
-            return memory
-
-        # Get best scene image for thumbnail
-        scene_1_bytes = None
-        for scene in memory.reel_scenes:
-            if scene.get("image_bytes"):
-                scene_1_bytes = scene["image_bytes"]
-                break
-
-        if not scene_1_bytes:
-            logger.warning("⚠️  No scene images for thumbnail")
-            return memory
-
-        from PIL import Image, ImageDraw, ImageFont, ImageEnhance
-        from io import BytesIO
-        import textwrap
-
-        # Load scene image
-        img = Image.open(BytesIO(scene_1_bytes))
-
-        # Convert to RGB
-        if img.mode != 'RGB':
-            if img.mode == 'RGBA':
-                bg = Image.new('RGB', img.size, (0, 0, 0))
-                bg.paste(img, mask=img.split()[3])
-                img = bg
-            else:
-                img = img.convert('RGB')
-
-        # Resize to 1080x1920
-        img = img.resize((1080, 1920), Image.LANCZOS)
-
-        # V4: DARKEN image slightly (text readable banega)
-        enhancer = ImageEnhance.Brightness(img)
-        img = enhancer.enhance(0.7)  # 70% brightness
-
-        # Convert to RGBA for overlays
-        img = img.convert("RGBA")
-        overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
-        draw = ImageDraw.Draw(overlay)
-
-        # ═══════════════════════════════════════════
-        # TOP GRADIENT (dark → transparent) for text readability
-        # ═══════════════════════════════════════════
-        for i in range(500):
-            alpha = int(200 * (1 - i / 500))
-            draw.rectangle([(0, i), (1080, i + 1)], fill=(0, 0, 0, alpha))
-
-        # ═══════════════════════════════════════════
-        # BOTTOM GRADIENT (transparent → dark) for brand
-        # ═══════════════════════════════════════════
-        for i in range(300):
-            alpha = int(180 * (i / 300))
-            y = 1920 - 300 + i
-            draw.rectangle([(0, y), (1080, y + 1)], fill=(0, 0, 0, alpha))
-
-        # ═══════════════════════════════════════════
-        # LOAD HINDI FONT
-        # ═══════════════════════════════════════════
-        font_path = None
-        font_paths = [
-            "fonts/NotoSansDevanagari-Bold.ttf",
-            "C:/Windows/Fonts/NirmalaB.ttf",
-            "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Bold.ttf",
-        ]
-        for fp in font_paths:
-            if os.path.exists(fp):
-                font_path = fp
-                break
-
-        if font_path:
-            font_huge = ImageFont.truetype(font_path, 85)   # HOOK text
-            font_medium = ImageFont.truetype(font_path, 50)  # Sub text
-            font_brand = ImageFont.truetype(font_path, 38)   # Brand
-        else:
-            font_huge = ImageFont.load_default()
-            font_medium = ImageFont.load_default()
-            font_brand = ImageFont.load_default()
-
-        # ═══════════════════════════════════════════
-        # GET HOOK TEXT from Scene 1
-        # ═══════════════════════════════════════════
-        scene_1 = memory.reel_scenes[0]
-        hook_text = scene_1.get("narration", memory.topic)
-
-        # Extract first impactful sentence
-        if 'क्या आप जानते' in hook_text:
-            hook_text = "क्या आप\nजानते हैं? 🤯"
-        elif '?' in hook_text:
-            parts = hook_text.split('?')
-            hook_text = parts[0].strip()[:30] + "?"
-        elif '।' in hook_text:
-            parts = hook_text.split('।')
-            hook_text = parts[0].strip()[:30]
-        elif len(hook_text) > 25:
-            # Wrap at ~12 chars per line
-            words = hook_text.split()[:5]
-            hook_text = ' '.join(words)
-        
-        # Add emoji based on category
-        category_emoji = {
-            "krishna": "🦚",
-            "shiva": "🕉️",
-            "hanuman": "🚩",
-            "ganesha": "🐘",
-            "durga": "🌺",
-            "ram": "🏹",
-            "motivational": "💪",
-            "temple": "🛕",
-        }
-        emoji = category_emoji.get(memory.category, "🙏")
-
-        # ═══════════════════════════════════════════
-        # DRAW HOOK TEXT (TOP - BIG BOLD)
-        # ═══════════════════════════════════════════
-        wrapped = textwrap.fill(hook_text, width=12)
-        lines = wrapped.split('\n')[:3]
-
-        y_pos = 100
-        for line in lines:
-            # Shadow (black outline for readability)
-            for dx in [-3, -2, 0, 2, 3]:
-                for dy in [-3, -2, 0, 2, 3]:
-                    draw.text((60 + dx, y_pos + dy), line, font=font_huge, fill=(0, 0, 0, 220))
-            
-            # Main text — BRIGHT GOLD
-            draw.text((60, y_pos), line, font=font_huge, fill=(255, 215, 0, 255))
-            y_pos += 100
-
-        # ═══════════════════════════════════════════
-        # EMOJI (Big, next to text)
-        # ═══════════════════════════════════════════
-        draw.text((900, 120), emoji, font=font_huge, fill=(255, 255, 255, 255))
-
-        # ═══════════════════════════════════════════
-        # CATEGORY TAG (Below hook text)
-        # ═══════════════════════════════════════════
-        category_hindi = {
-            "krishna": "श्री कृष्ण",
-            "shiva": "महादेव",
-            "hanuman": "हनुमान जी",
-            "ganesha": "गणेश जी",
-            "durga": "मां दुर्गा",
-            "ram": "श्री राम",
-            "motivational": "प्रेरणा",
-            "temple": "मंदिर",
-        }
-        cat_text = category_hindi.get(memory.category, "भक्ति")
-
-        # Pill background for category tag
-        tag_y = y_pos + 30
-        tag_text = f" {emoji} {cat_text} "
-        try:
-            bbox = font_medium.getbbox(tag_text)
-            tag_w = bbox[2] - bbox[0] + 40
-            tag_h = bbox[3] - bbox[1] + 20
-        except Exception:
-            tag_w = 300
-            tag_h = 60
-
-        # Draw rounded pill
-        draw.rounded_rectangle(
-            [(50, tag_y), (50 + tag_w, tag_y + tag_h)],
-            radius=30,
-            fill=(255, 100, 0, 200)  # Orange pill
+        thumb_bytes = memory.reel_thumbnail_bytes
+        thumb_path = Path(
+            memory.reel_thumbnail_path
+            or f"logs/thumbnails/thumb_card_{memory.session_id}.jpg"
         )
-        draw.text((70, tag_y + 5), tag_text, font=font_medium, fill=(255, 255, 255, 255))
+        thumb_path.parent.mkdir(parents=True, exist_ok=True)
+        if not thumb_path.exists():
+            with open(thumb_path, 'wb') as f:
+                f.write(thumb_bytes)
+            memory.reel_thumbnail_path = str(thumb_path)
 
-        # ═══════════════════════════════════════════
-        # BRAND NAME (Bottom)
-        # ═══════════════════════════════════════════
-        brand_text = "@sanatanii_soch"
-        draw.text((60, 1840), brand_text, font=font_brand, fill=(255, 215, 0, 220))
+        logger.info(f"✅ Final AI thumbnail/CTA card ready: {len(thumb_bytes):,} bytes")
+        logger.info(f"   📁 Path : {thumb_path}")
+        if getattr(memory, "reel_thumbnail_title", ""):
+            logger.info(f"   📝 Title: {memory.reel_thumbnail_title}")
 
-        # Small "▶️ Watch Now" text
-        draw.text((60, 1780), "▶ देखिए पूरी कहानी", font=font_brand, fill=(255, 255, 255, 180))
-
-        # ═══════════════════════════════════════════
-        # COMPOSE FINAL
-        # ═══════════════════════════════════════════
-        final = Image.alpha_composite(img, overlay)
-        final = final.convert("RGB")
-
-        # Save thumbnail
-        thumb_buf = BytesIO()
-        final.save(thumb_buf, format='JPEG', quality=92)
-        thumb_bytes = thumb_buf.getvalue()
-
-        # Save locally
-        thumb_dir = Path("logs/thumbnails")
-        thumb_dir.mkdir(parents=True, exist_ok=True)
-        thumb_path = thumb_dir / f"thumb_{memory.session_id}.jpg"
-
-        with open(thumb_path, 'wb') as f:
-            f.write(thumb_bytes)
-
-        logger.info(f"✅ Thumbnail generated: {len(thumb_bytes):,} bytes")
-        logger.info(f"   📁 Path: {thumb_path}")
-        logger.info(f"   📝 Hook: {hook_text[:40]}")
-        logger.info(f"   🏷️  Category: {cat_text}")
-
-        # Upload to GCS
+        # Upload to GCS so it can be used as IG cover_url and audit trail.
         try:
             from utils.gcs_helper import upload_image
             thumb_url = upload_image(
                 thumb_bytes,
                 folder="thumbnails",
-                metadata={"session_id": memory.session_id}
+                metadata={"session_id": memory.session_id, "type": "branded_card"},
             )
             memory.reel_thumbnail_url = thumb_url
             logger.info(f"   ☁️  Uploaded: {thumb_url[:60]}...")
@@ -1013,11 +804,10 @@ def _run_stage_thumbnail(memory: AgentMemory) -> AgentMemory:
             logger.warning(f"   ⚠️  Thumbnail upload failed: {e}")
 
     except Exception as e:
-        logger.warning(f"⚠️  Thumbnail generation failed: {e}")
+        logger.warning(f"⚠️  Thumbnail stage failed: {e}")
 
     elapsed = round(time.time() - start, 2)
     logger.info(f"✅ Thumbnail done ({elapsed}s)")
-
     return memory
 
 

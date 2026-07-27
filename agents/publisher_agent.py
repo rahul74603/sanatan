@@ -1204,20 +1204,31 @@ def post_reel_to_facebook(video_url: str, caption: str, memory: Optional[AgentMe
 # 🆕 V2: REEL — YOUTUBE SHORTS
 # ============================================================
 
-def post_reel_to_youtube(video_bytes: bytes, title: str, description: str, hashtags: str = "") -> dict:
+def post_reel_to_youtube(
+    video_bytes: bytes,
+    title: str,
+    description: str,
+    hashtags: str = "",
+    thumbnail_bytes: bytes = None,
+    thumbnail_path: str = None,
+) -> dict:
     """
     🆕 V2: Upload Reel to YouTube Shorts.
 
     Delegates to posting/youtube.py module.
 
     Args:
-        video_bytes: MP4 video bytes
-        title: Video title
-        description: Video description
-        hashtags: Hashtag string
+        video_bytes:     MP4 video bytes
+        title:           Video title
+        description:     Video description
+        hashtags:        Hashtag string
+        thumbnail_bytes: Optional branded thumbnail JPG bytes (uploaded as YT
+                         custom thumbnail after successful video upload).
+        thumbnail_path:  Optional path to thumbnail image (fallback if bytes
+                         are not supplied).
 
     Returns:
-        {"success": bool, "video_id": str, "url": str, "error": str}
+        {"success": bool, "video_id": str, "url": str, "error": str, ...}
     """
     logger.info("📺 YouTube Shorts upload शुरू...")
 
@@ -1238,11 +1249,15 @@ def post_reel_to_youtube(video_bytes: bytes, title: str, description: str, hasht
             video_bytes=video_bytes,
             title=title,
             description=description,
-            hashtags=hashtags
+            hashtags=hashtags,
+            thumbnail_bytes=thumbnail_bytes,
+            thumbnail_path=thumbnail_path,
         )
 
         if result.get("success"):
             logger.info(f"🎉 YouTube Short पब्लिश: {result.get('shorts_url', 'N/A')}")
+            if result.get("thumbnail_set"):
+                logger.info("🖼️  YouTube custom thumbnail set")
 
         return result
 
@@ -1419,7 +1434,9 @@ def run(memory: AgentMemory) -> AgentMemory:
                     video_bytes=memory.reel_video_bytes,
                     title=yt_title,
                     description=yt_description,
-                    hashtags=memory.hashtags or ""
+                    hashtags=memory.hashtags or "",
+                    thumbnail_bytes=getattr(memory, "reel_thumbnail_bytes", None),
+                    thumbnail_path=getattr(memory, "reel_thumbnail_path", "") or None,
                 )
 
                 memory.reel_yt_success = yt_result["success"]
