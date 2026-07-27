@@ -704,20 +704,26 @@ def upload_short(
     hashtags: str = "",
     category_id: str = None,
     privacy: str = None,
-    made_for_kids: bool = False
+    made_for_kids: bool = False,
+    thumbnail_bytes: bytes = None,
+    thumbnail_path: str = None,
 ) -> dict:
     """
     🎬 Upload video as YouTube Short.
 
     Args:
-        video_bytes: Video bytes (mutually exclusive with video_path)
-        video_path: Path to video file (mutually exclusive with video_bytes)
-        title: Video title (will add #Shorts if missing)
-        description: Video description
-        hashtags: Hashtag string (will be added to description + tags)
-        category_id: YouTube category ID (default: 22 = People & Blogs)
-        privacy: "public" | "unlisted" | "private"
-        made_for_kids: True if content is for kids under 13
+        video_bytes:     Video bytes (mutually exclusive with video_path)
+        video_path:      Path to video file (mutually exclusive with video_bytes)
+        title:           Video title (will add #Shorts if missing)
+        description:     Video description
+        hashtags:        Hashtag string (will be added to description + tags)
+        category_id:     YouTube category ID (default: 22 = People & Blogs)
+        privacy:         "public" | "unlisted" | "private"
+        made_for_kids:   True if content is for kids under 13
+        thumbnail_bytes: Optional custom thumbnail JPG/PNG bytes (uploaded after
+                         successful video upload via youtube.thumbnails().set()).
+        thumbnail_path:  Optional path to a thumbnail image (used only if
+                         thumbnail_bytes is not provided).
 
     Returns:
         {
@@ -726,6 +732,7 @@ def upload_short(
             "url": str,
             "watch_url": str,
             "shorts_url": str,
+            "thumbnail_set": bool,       # True if custom thumbnail applied
             "error": str  (if failed)
         }
     """
@@ -892,6 +899,54 @@ def upload_short(
         watch_url = f"https://www.youtube.com/watch?v={video_id}"
         shorts_url = f"https://youtube.com/shorts/{video_id}"
 
+        # ═══════════════════════════════════════════
+        # OPTIONAL: SET CUSTOM THUMBNAIL
+        # ═══════════════════════════════════════════
+        thumbnail_set = False
+        temp_thumb_path = None
+        try:
+            thumb_source = None
+
+            if thumbnail_bytes and len(thumbnail_bytes) > 1000:
+                temp_thumb = tempfile.NamedTemporaryFile(
+                    delete=False,
+                    suffix='.jpg',
+                    prefix='youtube_thumb_'
+                )
+                temp_thumb.write(thumbnail_bytes)
+                temp_thumb.close()
+                temp_thumb_path = temp_thumb.name
+                thumb_source = temp_thumb_path
+            elif thumbnail_path and Path(thumbnail_path).exists():
+                thumb_source = thumbnail_path
+
+            if thumb_source:
+                logger.info(f"🖼️  Setting YouTube custom thumbnail: {Path(thumb_source).name}")
+                media = MediaFileUpload(thumb_source, mimetype='image/jpeg')
+                youtube.thumbnails().set(
+                    videoId=video_id,
+                    media_body=media,
+                ).execute()
+                thumbnail_set = True
+                logger.info("✅ YouTube custom thumbnail set")
+        except HttpError as e:
+            # Custom thumbnail requires a verified channel. Do not fail the
+            # whole upload just because thumbnail set was rejected.
+            logger.warning(
+                f"⚠️  YouTube custom thumbnail not set (video upload still OK): "
+                f"HTTP {getattr(e.resp, 'status', '?')} — {e}"
+            )
+        except Exception as e:
+            logger.warning(
+                f"⚠️  YouTube custom thumbnail not set (video upload still OK): {e}"
+            )
+        finally:
+            if temp_thumb_path:
+                try:
+                    os.remove(temp_thumb_path)
+                except Exception:
+                    pass
+
         # Success!
         logger.info("═" * 55)
         logger.info("🎉 YOUTUBE SHORTS UPLOAD SUCCESS")
@@ -900,6 +955,7 @@ def upload_short(
         logger.info(f"   ⏱️  Upload time : {elapsed}s")
         logger.info(f"   🎬 Shorts URL  : {shorts_url}")
         logger.info(f"   📺 Watch URL   : {watch_url}")
+        logger.info(f"   🖼️  Thumbnail   : {'set' if thumbnail_set else 'default'}")
         logger.info("═" * 55)
 
         return {
@@ -911,7 +967,8 @@ def upload_short(
             "upload_time_seconds": elapsed,
             "file_size_mb": round(file_size_mb, 2),
             "title": final_title,
-            "privacy": privacy
+            "privacy": privacy,
+            "thumbnail_set": thumbnail_set,
         }
 
     except HttpError as e:
