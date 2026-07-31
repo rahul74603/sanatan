@@ -101,3 +101,9 @@ video_temp/
 
 # 📊 Local analytics dumps
 analytics_dump_*.json
+# 🔐 YouTube OAuth credentials (NEVER commit!)
+client_secrets.json
+sanatani_youtube_token.json
+sanatani_youtube_client_secrets.json
+*_token.json
+*_client_secrets.json
