@@ -32,7 +32,12 @@ from core.recovery_manager import (
     delete_checkpoint,
     save_checkpoint,
 )
-from config.settings import validate, get_config_summary
+from config.settings import (
+    validate,
+    get_config_summary,
+    YOUTUBE_ENABLED,
+    YOUTUBE_IMAGE_ENABLED,
+)
 from utils.logger import (
     get_logger,
     log_header,
@@ -373,10 +378,16 @@ def _generate_pipeline_report(
 
     ig_success = _safe_get(memory, 'ig_success', False)
     fb_success = _safe_get(memory, 'fb_success', False)
+    yt_success = _safe_get(memory, 'yt_success', False)
 
-    if ig_success and fb_success:
+    expected_platforms = [ig_success, fb_success]
+    if YOUTUBE_ENABLED and YOUTUBE_IMAGE_ENABLED:
+        expected_platforms.append(yt_success)
+    successful_platforms = sum(bool(value) for value in expected_platforms)
+
+    if successful_platforms == len(expected_platforms):
         status = "success"
-    elif ig_success or fb_success:
+    elif successful_platforms > 0:
         status = "partial"
     else:
         status = "error"
@@ -400,6 +411,12 @@ def _generate_pipeline_report(
             "facebook": {
                 "success": fb_success,
                 "post_id": _safe_get(memory, 'fb_post_id', '')
+            },
+            "youtube": {
+                "success": yt_success,
+                "post_id": _safe_get(memory, 'yt_post_id', ''),
+                "url": _safe_get(memory, 'yt_url', ''),
+                "enabled": YOUTUBE_ENABLED and YOUTUBE_IMAGE_ENABLED,
             }
         },
 
@@ -412,7 +429,10 @@ def _generate_pipeline_report(
             ).get("provider", "unknown"),
             "cost_inr": (
                 _safe_get(memory, 'image_metadata', {}) or {}
-            ).get("estimated_cost_inr", 0)
+            ).get(
+                "estimated_cost_inr",
+                (_safe_get(memory, 'image_metadata', {}) or {}).get("cost_inr", 0),
+            )
         },
 
         "content": {
@@ -500,6 +520,12 @@ def _log_pipeline_summary(report: dict):
     fb_status = "✅" if pub['facebook']['success'] else "❌"
     logger.info(f"   {ig_status} Instagram: {pub['instagram']['post_id'] or 'विफल'}")
     logger.info(f"   {fb_status} Facebook : {pub['facebook']['post_id'] or 'विफल'}")
+    yt = pub.get('youtube', {})
+    if yt.get('enabled'):
+        yt_status = "✅" if yt.get('success') else "❌"
+        logger.info(f"   {yt_status} YouTube  : {yt.get('post_id') or 'विफल'}")
+    else:
+        logger.info("   ⏭️  YouTube  : image-to-Short disabled")
     logger.info("")
 
     stats = report['stats']
@@ -759,6 +785,82 @@ def _recover_latest_failed_youtube_reel_from_db() -> Optional[dict]:
         }
 
 
+def _recover_latest_failed_image_from_db() -> Optional[dict]:
+    """Retry only Instagram for the latest image row that failed there.
+
+    The original image pipeline saved the row but had no recovery path, so an
+    Instagram container error was lost forever even though the GCS image URL
+    was still valid.  This fallback never regenerates or reposts Facebook.
+    """
+    try:
+        from core.database import initialize_database, get_connection
+
+        initialize_database()
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT id, topic, category, image_url, caption, hashtags, created_at
+            FROM post_history
+            WHERE post_type = 'image'
+              AND datetime(created_at) >= datetime('now', '-7 days')
+              AND COALESCE(ig_success, 0) = 0
+              AND COALESCE(image_url, '') != ''
+            ORDER BY datetime(created_at) DESC, id DESC
+            LIMIT 1
+        """)
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            return None
+
+        post_id, topic, category, image_url, caption, hashtags, created_at = row
+        logger.info(
+            f"♻️  DB से Instagram-pending image मिली (ID {post_id}, "
+            f"created {created_at})"
+        )
+        full_caption = publisher_agent._prepare_caption(caption or "", hashtags or "")
+        result = publisher_agent.post_to_instagram(image_url, full_caption)
+
+        if result.get("success"):
+            conn = get_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE post_history
+                SET ig_post_id = ?, ig_success = 1
+                WHERE id = ?
+            """, (result.get("post_id", ""), post_id))
+            conn.commit()
+            conn.close()
+            logger.info(f"🎉 Instagram image recovery सफल: {result.get('post_id', '')}")
+            return {
+                "status": "success",
+                "post_type": "image",
+                "recovery_source": "db_instagram_image_fallback",
+                "post_db_id": post_id,
+                "topic": topic or "",
+                "ig_post_id": result.get("post_id", ""),
+            }
+
+        error = result.get("error", "Instagram publish failed")
+        logger.error(f"❌ Instagram image recovery विफल: {error}")
+        return {
+            "status": "failed",
+            "post_type": "image",
+            "recovery_source": "db_instagram_image_fallback",
+            "post_db_id": post_id,
+            "topic": topic or "",
+            "message": error,
+        }
+    except Exception as e:
+        logger.error(f"❌ Instagram image fallback recovery failed: {e}")
+        return {
+            "status": "error",
+            "post_type": "image",
+            "recovery_source": "db_instagram_image_fallback",
+            "message": str(e),
+        }
+
+
 def _check_and_load_recovery(post_type: str = "carousel") -> Optional[AgentMemory]:
     """
     पुराने अधूरे session को detect करो और memory में load करो।
@@ -898,8 +1000,10 @@ def run_pipeline() -> dict:
                 "hashtags":         memory.hashtags,
                 "ig_post_id":       memory.ig_post_id,
                 "fb_post_id":       memory.fb_post_id,
+                "yt_post_id":       memory.yt_post_id,
                 "ig_success":       memory.ig_success,
                 "fb_success":       memory.fb_success,
+                "yt_success":       memory.yt_success,
                 "duration_seconds": duration,
                 "post_type":        "image"
             })
@@ -1704,6 +1808,12 @@ def run_recovery_only() -> dict:
                 "message": str(e)
             }
 
+    # Image fallback: checkpoint missing but DB says Instagram image publish
+    # failed.  Retry only Instagram; do not generate/post a duplicate image.
+    image_db_recovery = _recover_latest_failed_image_from_db()
+    if image_db_recovery is not None:
+        return image_db_recovery
+
     # Last fallback: checkpoint missing but DB says latest reel still needs YouTube.
     yt_db_recovery = _recover_latest_failed_youtube_reel_from_db()
     if yt_db_recovery is not None:
@@ -2093,7 +2203,9 @@ def _run_cli():
         elif command == "image":
             logger.info("🖼️  MANUAL IMAGE MODE")
             result = run_pipeline()
-            sys.exit(0 if result["status"] == "success" else 2)
+            # A single platform failure is recoverable/partial, not a hard
+            # process crash; CI can still inspect the detailed report/log.
+            sys.exit(0 if result["status"] in {"success", "partial"} else 2)
 
         # ── COST STATS ────────────────────────────────────────
         elif command == "cost":
@@ -2168,8 +2280,8 @@ def _run_cli():
 ║       DIVINE AUTO POSTER V2 — HELP                ║
 ╠═══════════════════════════════════════════════════╣
 ║  IMAGE COMMANDS:                                  ║
-║  python main.py                → Single image     ║
-║  python main.py image          → Single image     ║
+║  python main.py                → Image + YT Short ║
+║  python main.py image          → Image + YT Short ║
 ║                                                   ║
 ║  CAROUSEL COMMANDS:                               ║
 ║  python main.py carousel       → With recovery    ║

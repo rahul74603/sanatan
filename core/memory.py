@@ -67,8 +67,11 @@ class AgentMemory:
     # Publisher output
     ig_post_id: str = ""
     fb_post_id: str = ""
+    yt_post_id: str = ""                 # YouTube video/Short ID
+    yt_url: str = ""                      # Published YouTube URL
     ig_success: bool = False
     fb_success: bool = False
+    yt_success: bool = False
 
     # Analytics
     analytics_data: dict = field(default_factory=dict)
@@ -323,6 +326,13 @@ class AgentMemory:
             "image_url":           self.image_url,
             "caption":             self.caption,
             "hashtags":            self.hashtags,
+            "ig_post_id":          self.ig_post_id,
+            "fb_post_id":          self.fb_post_id,
+            "yt_post_id":          self.yt_post_id,
+            "yt_url":              self.yt_url,
+            "ig_success":          self.ig_success,
+            "fb_success":          self.fb_success,
+            "yt_success":          self.yt_success,
 
             # Carousel
             "carousel_slides":     clean_slides,
@@ -392,6 +402,13 @@ class AgentMemory:
         self.image_url           = data.get("image_url", "")
         self.caption             = data.get("caption", "")
         self.hashtags            = data.get("hashtags", "")
+        self.ig_post_id          = data.get("ig_post_id", "")
+        self.fb_post_id          = data.get("fb_post_id", "")
+        self.yt_post_id          = data.get("yt_post_id", "")
+        self.yt_url              = data.get("yt_url", "")
+        self.ig_success          = data.get("ig_success", False)
+        self.fb_success          = data.get("fb_success", False)
+        self.yt_success          = data.get("yt_success", False)
 
         # Carousel restore
         self.carousel_slides     = data.get("carousel_slides", [])
@@ -472,8 +489,11 @@ class AgentMemory:
             # Single image publishing
             "ig_post_id":          self.ig_post_id,
             "fb_post_id":          self.fb_post_id,
+            "yt_post_id":          self.yt_post_id,
+            "yt_url":              self.yt_url,
             "ig_success":          self.ig_success,
             "fb_success":          self.fb_success,
+            "yt_success":          self.yt_success,
 
             # Quality
             "quality_score":       self.quality_score,

@@ -24,10 +24,12 @@ Setup Flow (one-time):
 5. Copy token JSON content to GitHub secret: YOUTUBE_TOKEN_JSON
 """
 import os
+import shutil
+import subprocess
 import time
 import tempfile
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 
 # Google OAuth + YouTube API
 try:
@@ -42,6 +44,16 @@ try:
 except ImportError as e:
     YOUTUBE_LIBS_AVAILABLE = False
     _import_error = str(e)
+    # Keep this module importable for image/Meta-only runs.  The old code left
+    # ``Credentials``/``HttpError`` undefined, so merely importing main.py
+    # crashed when optional YouTube packages were not installed.
+    Request = InstalledAppFlow = build = MediaFileUpload = MediaIoBaseUpload = None
+    Credentials = Any
+
+    class HttpError(Exception):
+        """Placeholder used only when the optional Google client is absent."""
+
+        pass
 
 from config.settings import (
     YOUTUBE_ENABLED,
@@ -52,6 +64,8 @@ from config.settings import (
     YOUTUBE_PRIVACY_STATUS,
     YOUTUBE_MADE_FOR_KIDS,
     YOUTUBE_UPLOAD_MAX_RETRIES,
+    YOUTUBE_IMAGE_ENABLED,
+    YOUTUBE_IMAGE_DURATION_SECONDS,
 )
 from utils.logger import get_logger
 
@@ -274,7 +288,7 @@ def _initial_oauth_setup():
     print("⚠️  Important:")
     print("   • Login with the Gmail account that owns your YouTube channel")
     print("   • Make sure your email is added as 'Test user' in OAuth consent screen")
-    print("   • Grant ALL requested permissions (upload + readonly)")
+    print("   • Grant the requested YouTube upload permission")
     print()
     print("🌐 Opening browser...")
     print("═" * 60)
@@ -391,7 +405,6 @@ def _generate_seo_title(topic: str, category: str = "") -> str:
     emoji = category_emoji.get(category, "🙏")
 
     # Clean topic (remove English, keep short)
-    import re
     # Extract meaningful Hindi words from topic
     hindi_chars = ''.join(c for c in topic if '\u0900' <= c <= '\u097F' or c == ' ')
     hindi_chars = hindi_chars.strip()
@@ -580,16 +593,23 @@ def _generate_seo_tags(category: str = "", hashtags: str = "") -> list:
 
 
 def _prepare_title(title: str, add_shorts_tag: bool = True) -> str:
-    """Prepare video title for YouTube Shorts"""
-    max_len = 90 if add_shorts_tag else 100
+    """Prepare a YouTube title while respecting the 100-character limit."""
+    import re
 
-    if len(title) > max_len:
-        title = title[:max_len].strip() + "..."
+    title = (title or "Spiritual Content").strip()
+    suffix = f" {SHORTS_HASHTAG}" if add_shorts_tag else ""
 
-    if add_shorts_tag and "#shorts" not in title.lower():
-        title = f"{title} {SHORTS_HASHTAG}"
+    if add_shorts_tag:
+        # Remove an existing tag before appending a complete, non-truncated
+        # suffix; otherwise a 100-character title could end in a broken
+        # ``#`` and YouTube would not recognize it as a Short.
+        title = re.sub(r"\s*#shorts\b", "", title, flags=re.IGNORECASE).strip()
+        available = 100 - len(suffix)
+        if len(title) > available:
+            title = title[:max(0, available - 3)].rstrip() + "..."
+        return f"{title}{suffix}"[:100].strip()
 
-    return title.strip()
+    return title[:100].strip()
 
 
 def _prepare_description(
@@ -694,6 +714,173 @@ def _upload_with_retry(request):
             raise
 
     return response
+
+
+# ============================================================
+# IMAGE → YOUTUBE SHORT
+# ============================================================
+
+def _find_ffmpeg() -> str:
+    """Find the bundled imageio FFmpeg binary or a system FFmpeg."""
+    try:
+        import imageio_ffmpeg
+        executable = imageio_ffmpeg.get_ffmpeg_exe()
+        if executable:
+            return executable
+    except Exception:
+        pass
+
+    executable = shutil.which("ffmpeg")
+    if executable:
+        return executable
+    raise RuntimeError(
+        "FFmpeg नहीं मिला. requirements.txt में imageio-ffmpeg install करें "
+        "या system में ffmpeg उपलब्ध कराएं."
+    )
+
+
+def create_short_video_from_image(
+    image_bytes: bytes,
+    output_path: str,
+    duration_seconds: int = None,
+) -> str:
+    """
+    Convert one generated image into a valid 9:16 MP4 for YouTube Shorts.
+
+    YouTube Data API v3 uploads videos, not standalone Community image posts.
+    The image is kept fully visible over a softly blurred vertical background so
+    square/landscape generated art is not cropped by Shorts.
+    """
+    if not image_bytes:
+        raise ValueError("Image bytes खाली हैं")
+
+    duration = duration_seconds or YOUTUBE_IMAGE_DURATION_SECONDS
+    duration = max(1, min(int(duration), SHORTS_MAX_DURATION))
+
+    try:
+        from io import BytesIO
+        from PIL import Image, ImageEnhance, ImageFilter, ImageOps
+
+        with Image.open(BytesIO(image_bytes)) as source:
+            image = ImageOps.exif_transpose(source).convert("RGB")
+
+        width, height = 1080, 1920
+        resampling = getattr(Image, "Resampling", Image).LANCZOS
+
+        # Blur/crop background fills the Shorts canvas without cutting the
+        # original artwork from the foreground.
+        background = ImageOps.fit(
+            image, (width, height), method=resampling, centering=(0.5, 0.5)
+        )
+        background = background.filter(ImageFilter.GaussianBlur(radius=22))
+        background = ImageEnhance.Brightness(background).enhance(0.62)
+
+        canvas = background
+        foreground = image.copy()
+        foreground.thumbnail((width - 80, height - 220), resample=resampling)
+        x = (width - foreground.width) // 2
+        y = (height - foreground.height) // 2
+        canvas.paste(foreground, (x, y))
+
+        output = Path(output_path)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        frame_path = output.with_suffix(".jpg")
+        canvas.save(frame_path, format="JPEG", quality=95, optimize=True)
+
+        ffmpeg = _find_ffmpeg()
+        command = [
+            ffmpeg,
+            "-y",
+            "-loglevel", "error",
+            "-loop", "1",
+            "-framerate", "30",
+            "-i", str(frame_path),
+            "-t", str(duration),
+            "-r", "30",
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart",
+            "-an",
+            str(output),
+        ]
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=max(120, duration * 10),
+            check=False,
+        )
+        try:
+            frame_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+        if completed.returncode != 0 or not output.exists() or output.stat().st_size == 0:
+            detail = (completed.stderr or "unknown FFmpeg error").strip()[-1000:]
+            raise RuntimeError(f"Image-to-video conversion failed: {detail}")
+
+        logger.info(
+            f"✅ Image converted to YouTube Short MP4: {output} "
+            f"({duration}s, {output.stat().st_size / 1024:.0f} KB)"
+        )
+        return str(output)
+    except Exception:
+        # Do not leave a partially written output around after a conversion
+        # failure; the caller can safely retry the upload.
+        try:
+            Path(output_path).unlink(missing_ok=True)
+            Path(output_path).with_suffix(".jpg").unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise
+
+
+def upload_image_as_short(
+    image_bytes: bytes,
+    title: str,
+    description: str = "",
+    hashtags: str = "",
+    duration_seconds: int = None,
+) -> dict:
+    """Upload a generated image as a YouTube Short.
+
+    This function intentionally returns the same result shape as
+    :func:`upload_short`, making image and reel publishing/recovery consistent.
+    """
+    if not YOUTUBE_ENABLED:
+        return {
+            "success": False,
+            "video_id": "",
+            "url": "",
+            "error": "YouTube disabled in config",
+        }
+    if not YOUTUBE_IMAGE_ENABLED:
+        return {
+            "success": False,
+            "video_id": "",
+            "url": "",
+            "error": "YouTube image-to-Short publishing disabled in config",
+        }
+
+    with tempfile.TemporaryDirectory(prefix="youtube_image_") as temp_dir:
+        video_path = Path(temp_dir) / "image_short.mp4"
+        create_short_video_from_image(
+            image_bytes=image_bytes,
+            output_path=str(video_path),
+            duration_seconds=duration_seconds,
+        )
+        return upload_short(
+            video_path=str(video_path),
+            title=title,
+            description=description,
+            hashtags=hashtags,
+            thumbnail_bytes=image_bytes,
+        )
+
+
+# Backward-compatible descriptive alias.
+upload_image_short = upload_image_as_short
 
 
 def upload_short(
