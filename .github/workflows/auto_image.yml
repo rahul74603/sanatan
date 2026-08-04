@@ -1,55 +1,49 @@
-﻿name: ðŸ“¸ Auto Image Post (Daily 8 AM IST)
+name: Auto Image Post (Daily 8 AM IST)
 
 on:
   schedule:
-    # Daily 8:00 AM IST (2:30 AM UTC)
     - cron: '30 2 * * *'
-  
-  # Manual trigger (mobile se run kar sakte ho)
+
   workflow_dispatch:
 
 jobs:
   post-image:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    
+
     steps:
-      - name: ðŸ“¥ Checkout code
+      - name: Checkout code
         uses: actions/checkout@v4
-      
-      - name: ðŸ Setup Python 3.11
+
+      - name: Setup Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: 'pip'
-      
-      - name: ðŸ“¦ Install dependencies
+
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-      
-      - name: ðŸ” Setup Google Cloud credentials
-        run: |
-          echo '${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}' > spiritual-service-account.json
 
-      # Upload generated image as YouTube Short
+      - name: Setup Google Cloud credentials
+        run: |
+          printf '%s' '${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}' > spiritual-service-account.json
+
       - name: Setup YouTube OAuth credentials
         env:
-          YOUTUBE_TOKEN_JSON: 
-${{ secrets.YOUTUBE_TOKEN_JSON }}
-          YOUTUBE_CLIENT_SECRETS_JSON: 
-${{ secrets.YOUTUBE_CLIENT_SECRETS_JSON }}
+          YOUTUBE_TOKEN_JSON: ${{ secrets.YOUTUBE_TOKEN_JSON }}
+          YOUTUBE_CLIENT_SECRETS_JSON: ${{ secrets.YOUTUBE_CLIENT_SECRETS_JSON }}
         run: |
           if [ -n "$YOUTUBE_TOKEN_JSON" ]; then
             printf '%s' "$YOUTUBE_TOKEN_JSON" > sanatani_youtube_token.json
           fi
+
           if [ -n "$YOUTUBE_CLIENT_SECRETS_JSON" ]; then
             printf '%s' "$YOUTUBE_CLIENT_SECRETS_JSON" > sanatani_youtube_client_secrets.json
           fi
-      
-            # No pre-delay â€” video builds immediately, delay happens before posting
-      
-      - name: ðŸ“¸ Run Image Post
+
+      - name: Run Image Post
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           ACCESS_TOKEN: ${{ secrets.ACCESS_TOKEN }}
@@ -62,11 +56,16 @@ ${{ secrets.YOUTUBE_CLIENT_SECRETS_JSON }}
           META_APP_SECRET: ${{ secrets.META_APP_SECRET }}
           GOOGLE_APPLICATION_CREDENTIALS: spiritual-service-account.json
 
-          YOUTUBE_ENABLED: ${{ secrets.YOUTUBE_TOKEN_JSON != '' && 'true' || 'false' }}           YOUTUBE_IMAGE_ENABLED: ${{ secrets.YOUTUBE_TOKEN_JSON != '' && 'true' || 'false' }}           YOUTUBE_CHANNEL_ID: ${{ secrets.YOUTUBE_CHANNEL_ID }}           YOUTUBE_CLIENT_SECRETS_FILE: sanatani_youtube_client_secrets.json           YOUTUBE_TOKEN_FILE: sanatani_youtube_token.json
+          YOUTUBE_ENABLED: ${{ secrets.YOUTUBE_TOKEN_JSON != '' && 'true' || 'false' }}
+          YOUTUBE_IMAGE_ENABLED: ${{ secrets.YOUTUBE_TOKEN_JSON != '' && 'true' || 'false' }}
+          YOUTUBE_CHANNEL_ID: ${{ secrets.YOUTUBE_CHANNEL_ID }}
+          YOUTUBE_CLIENT_SECRETS_FILE: sanatani_youtube_client_secrets.json
+          YOUTUBE_TOKEN_FILE: sanatani_youtube_token.json
+
         run: |
           python main.py image
-      
-      - name: ðŸ“Š Upload logs (for debugging)
+
+      - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -74,8 +73,8 @@ ${{ secrets.YOUTUBE_CLIENT_SECRETS_JSON }}
           path: logs/*.log
           retention-days: 3
           if-no-files-found: ignore
-      
-      - name: ðŸ—‘ï¸ Cleanup credentials
+
+      - name: Cleanup credentials
         if: always()
         run: |
           rm -f spiritual-service-account.json
