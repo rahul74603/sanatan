@@ -29,7 +29,7 @@ from utils.logger import get_logger
 
 logger = get_logger("analytics_agent")
 
-META_VERSION = META_API_VERSION or "v18.0"
+META_VERSION = META_API_VERSION or "v25.0"
 
 
 # ============================================================

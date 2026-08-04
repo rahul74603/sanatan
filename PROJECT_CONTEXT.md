@@ -1734,7 +1734,7 @@ FACEBOOK_PAGE_ID=your_fb_page_id
 ACCESS_TOKEN=your_long_lived_meta_token
 META_APP_ID=your_meta_app_id
 META_APP_SECRET=your_meta_app_secret
-META_API_VERSION=v18.0
+META_API_VERSION=v25.0
 
 # ═══════════════════════════════════════════════════════════
 # ⏰ POSTING SCHEDULE (Existing)
@@ -1781,6 +1781,9 @@ YOUTUBE_CHANNEL_ID=your_youtube_channel_id
 YOUTUBE_CLIENT_SECRETS_FILE=youtube_client_secrets.json
 YOUTUBE_TOKEN_FILE=youtube_token.json
 YOUTUBE_PRIVACY_STATUS=public
+# YouTube Data API uploads videos, so morning images become 8-second 9:16 Shorts.
+YOUTUBE_IMAGE_ENABLED=true
+YOUTUBE_IMAGE_DURATION_SECONDS=8
 
 # ═══════════════════════════════════════════════════════════
 # 💾 DATABASE (Existing)

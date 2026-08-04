@@ -1,4 +1,4 @@
-name: 🌙 Auto Evening Post (Daily 8 PM IST - Smart)
+﻿name: ðŸŒ™ Auto Evening Post (Daily 8 PM IST - Smart)
 
 on:
   schedule:
@@ -14,27 +14,27 @@ jobs:
     timeout-minutes: 60  # 60 min (video building can take time)
     
     steps:
-      - name: 📥 Checkout code
+      - name: ðŸ“¥ Checkout code
         uses: actions/checkout@v4
       
-      - name: 🐍 Setup Python 3.11
+      - name: ðŸ Setup Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: 'pip'
       
-      - name: 🎬 Install FFmpeg
+      - name: ðŸŽ¬ Install FFmpeg
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg
           ffmpeg -version
       
-      - name: 📦 Install Python dependencies
+      - name: ðŸ“¦ Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
       
-      - name: 🔤 Verify Hindi fonts
+      - name: ðŸ”¤ Verify Hindi fonts
         run: |
           if [ ! -f "fonts/NotoSansDevanagari-Bold.ttf" ]; then
             echo "Downloading Hindi fonts..."
@@ -44,20 +44,20 @@ jobs:
           fi
           ls -la fonts/
       
-      - name: 🔐 Setup Google Cloud credentials
+      - name: ðŸ” Setup Google Cloud credentials
         run: |
           echo '${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}' > spiritual-service-account.json
       
-      - name: 🔐 Setup YouTube OAuth credentials
+      - name: ðŸ” Setup YouTube OAuth credentials
         run: |
           echo '${{ secrets.YOUTUBE_CLIENT_SECRETS_JSON }}' > sanatani_youtube_client_secrets.json
           if [ ! -z "${{ secrets.YOUTUBE_TOKEN_JSON }}" ]; then
             echo '${{ secrets.YOUTUBE_TOKEN_JSON }}' > sanatani_youtube_token.json
           fi
       
-            # No pre-delay — video builds immediately, delay happens before posting
+            # No pre-delay â€” video builds immediately, delay happens before posting
       
-      - name: 🌙 Run Smart Evening Post (Auto-detects Reel or Carousel)
+      - name: ðŸŒ™ Run Smart Evening Post (Auto-detects Reel or Carousel)
         env:
           # Google Cloud
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -75,13 +75,15 @@ jobs:
           
           # YouTube (for reel days)
           YOUTUBE_CHANNEL_ID: ${{ secrets.YOUTUBE_CHANNEL_ID }}
+
+          YOUTUBE_ENABLED: ${{ secrets.YOUTUBE_TOKEN_JSON != '' && 'true' || 'false' }}
           YOUTUBE_CLIENT_SECRETS_FILE: sanatani_youtube_client_secrets.json
           YOUTUBE_TOKEN_FILE: sanatani_youtube_token.json
         run: |
-          # 🎯 Smart decision: DB checks if today is carousel day
+          # ðŸŽ¯ Smart decision: DB checks if today is carousel day
           python main.py evening-smart
       
-      - name: 📊 Upload logs
+      - name: ðŸ“Š Upload logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -92,7 +94,7 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
       
-      - name: 🗑️ Cleanup credentials
+      - name: ðŸ—‘ï¸ Cleanup credentials
         if: always()
         run: |
           rm -f spiritual-service-account.json

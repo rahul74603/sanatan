@@ -11,6 +11,50 @@ load_dotenv()
 
 
 # ═══════════════════════════════════════════════════════════
+# SAFE ENVIRONMENT PARSING
+# ═══════════════════════════════════════════════════════════
+# A malformed/empty GitHub secret must not crash the whole application while
+# importing settings.  Keep all defaults in one place and log only at runtime
+# (settings is imported by almost every module).
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _env_int(name: str, default: int, minimum: int = None) -> int:
+    value = os.getenv(name)
+    try:
+        parsed = int(value) if value is not None and value.strip() else default
+    except (TypeError, ValueError):
+        parsed = default
+    return max(parsed, minimum) if minimum is not None else parsed
+
+
+def _env_float(name: str, default: float, minimum: float = None) -> float:
+    value = os.getenv(name)
+    try:
+        parsed = float(value) if value is not None and value.strip() else default
+    except (TypeError, ValueError):
+        parsed = default
+    return max(parsed, minimum) if minimum is not None else parsed
+
+
+def _env_hours(name: str, default: str) -> list:
+    raw = os.getenv(name, default)
+    hours = []
+    for item in (raw or "").split(","):
+        try:
+            hour = int(item.strip())
+        except (TypeError, ValueError):
+            continue
+        if 0 <= hour <= 23:
+            hours.append(hour)
+    return hours or [int(item) for item in default.split(",")]
+
+
+# ═══════════════════════════════════════════════════════════
 # 🌐 GOOGLE CLOUD PLATFORM
 # ═══════════════════════════════════════════════════════════
 PROJECT_ID = os.getenv("PROJECT_ID")
@@ -30,9 +74,9 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
 
 # Gemini generation defaults
-GEMINI_TEMPERATURE = float(os.getenv("GEMINI_TEMPERATURE", "0.9"))
-GEMINI_MAX_TOKENS = int(os.getenv("GEMINI_MAX_TOKENS", "1000"))
-GEMINI_TOP_P = float(os.getenv("GEMINI_TOP_P", "0.95"))
+GEMINI_TEMPERATURE = _env_float("GEMINI_TEMPERATURE", 0.9)
+GEMINI_MAX_TOKENS = _env_int("GEMINI_MAX_TOKENS", 1000, minimum=1)
+GEMINI_TOP_P = _env_float("GEMINI_TOP_P", 0.95, minimum=0.0)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -43,23 +87,23 @@ GEMINI_TOP_P = float(os.getenv("GEMINI_TOP_P", "0.95"))
 #   • imagen-3.0-generate-002            → BALANCED (~₹1.5/image) [DEFAULT]
 #   • imagen-3.0-fast-generate-001       → FASTEST (~₹1/image)
 # ═══════════════════════════════════════════════════════════
-USE_VERTEX_AI = os.getenv("USE_VERTEX_AI", "true").lower() == "true"
+USE_VERTEX_AI = _env_bool("USE_VERTEX_AI", True)
 VERTEX_MODEL = os.getenv("VERTEX_MODEL", "imagen-3.0-generate-002").strip()
-VERTEX_MAX_RETRIES = int(os.getenv("VERTEX_MAX_RETRIES", "3"))
-VERTEX_RETRY_DELAY = int(os.getenv("VERTEX_RETRY_DELAY", "5"))  # seconds
+VERTEX_MAX_RETRIES = _env_int("VERTEX_MAX_RETRIES", 3, minimum=1)
+VERTEX_RETRY_DELAY = _env_int("VERTEX_RETRY_DELAY", 5, minimum=0)  # seconds
 VERTEX_ASPECT_RATIO = os.getenv("VERTEX_ASPECT_RATIO", "1:1")
 
 # Cost tracking thresholds (INR)
-VERTEX_DAILY_BUDGET = float(os.getenv("VERTEX_DAILY_BUDGET", "100.0"))
-VERTEX_MONTHLY_BUDGET = float(os.getenv("VERTEX_MONTHLY_BUDGET", "2000.0"))
+VERTEX_DAILY_BUDGET = _env_float("VERTEX_DAILY_BUDGET", 100.0, minimum=0.0)
+VERTEX_MONTHLY_BUDGET = _env_float("VERTEX_MONTHLY_BUDGET", 2000.0, minimum=0.0)
 
 
 # ═══════════════════════════════════════════════════════════
 # 🖼️ POLLINATIONS.AI (Free Fallback)
 # ═══════════════════════════════════════════════════════════
-POLLINATIONS_ENABLED = os.getenv("POLLINATIONS_ENABLED", "true").lower() == "true"
-POLLINATIONS_MAX_RETRIES = int(os.getenv("POLLINATIONS_MAX_RETRIES", "3"))
-POLLINATIONS_TIMEOUT = int(os.getenv("POLLINATIONS_TIMEOUT", "120"))
+POLLINATIONS_ENABLED = _env_bool("POLLINATIONS_ENABLED", True)
+POLLINATIONS_MAX_RETRIES = _env_int("POLLINATIONS_MAX_RETRIES", 3, minimum=1)
+POLLINATIONS_TIMEOUT = _env_int("POLLINATIONS_TIMEOUT", 120, minimum=1)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -71,58 +115,62 @@ ACCESS_TOKEN = os.getenv("ACCESS_TOKEN")
 META_APP_ID = os.getenv("META_APP_ID")
 META_APP_SECRET = os.getenv("META_APP_SECRET")
 
-# Meta API version
-META_API_VERSION = os.getenv("META_API_VERSION", "v18.0")
+# Meta API version.  v18.0 is retired; keep this overrideable because Meta
+# versions have a fixed sunset window.  v25.0 is the current stable version.
+_configured_meta_version = os.getenv("META_API_VERSION", "").strip()
+if not _configured_meta_version or _configured_meta_version.lower() == "v18.0":
+    META_API_VERSION = "v25.0"
+else:
+    META_API_VERSION = _configured_meta_version
 
 # Publishing delays (seconds)
-DELAY_BEFORE_POST_MIN = int(os.getenv("DELAY_BEFORE_POST_MIN", "0"))
-DELAY_BEFORE_POST_MAX = int(os.getenv("DELAY_BEFORE_POST_MAX", "180"))
-DELAY_BETWEEN_PLATFORMS_MIN = int(os.getenv("DELAY_BETWEEN_PLATFORMS_MIN", "30"))
-DELAY_BETWEEN_PLATFORMS_MAX = int(os.getenv("DELAY_BETWEEN_PLATFORMS_MAX", "90"))
+DELAY_BEFORE_POST_MIN = _env_int("DELAY_BEFORE_POST_MIN", 0, minimum=0)
+DELAY_BEFORE_POST_MAX = _env_int("DELAY_BEFORE_POST_MAX", 180, minimum=0)
+DELAY_BETWEEN_PLATFORMS_MIN = _env_int("DELAY_BETWEEN_PLATFORMS_MIN", 30, minimum=0)
+DELAY_BETWEEN_PLATFORMS_MAX = _env_int("DELAY_BETWEEN_PLATFORMS_MAX", 90, minimum=0)
+if DELAY_BETWEEN_PLATFORMS_MAX < DELAY_BETWEEN_PLATFORMS_MIN:
+    DELAY_BETWEEN_PLATFORMS_MAX = DELAY_BETWEEN_PLATFORMS_MIN
 
 
 # ═══════════════════════════════════════════════════════════
 # ⏰ POSTING SCHEDULE (IST)
 # ═══════════════════════════════════════════════════════════
-POSTING_HOURS = [
-    int(h.strip())
-    for h in os.getenv("POSTING_HOURS", "8,13,20").split(",")
-]
-TIME_VARIATION_MINUTES = int(os.getenv("TIME_VARIATION_MINUTES", "45"))
-POSTS_PER_DAY = int(os.getenv("POSTS_PER_DAY", "3"))
+POSTING_HOURS = _env_hours("POSTING_HOURS", "8,13,20")
+TIME_VARIATION_MINUTES = _env_int("TIME_VARIATION_MINUTES", 45, minimum=0)
+POSTS_PER_DAY = _env_int("POSTS_PER_DAY", 3, minimum=1)
 
 
 # ═══════════════════════════════════════════════════════════
 # 📝 CONTENT SETTINGS
 # ═══════════════════════════════════════════════════════════
-MAX_CAPTION_LENGTH = int(os.getenv("MAX_CAPTION_LENGTH", "2200"))
-MIN_CAPTION_LENGTH = int(os.getenv("MIN_CAPTION_LENGTH", "50"))
-MAX_HASHTAGS = int(os.getenv("MAX_HASHTAGS", "25"))
+MAX_CAPTION_LENGTH = _env_int("MAX_CAPTION_LENGTH", 2200, minimum=1)
+MIN_CAPTION_LENGTH = _env_int("MIN_CAPTION_LENGTH", 50, minimum=0)
+MAX_HASHTAGS = _env_int("MAX_HASHTAGS", 25, minimum=0)
 IMAGE_ASPECT_RATIO = os.getenv("IMAGE_ASPECT_RATIO", "1:1")
 
 
 # ═══════════════════════════════════════════════════════════
 # ✅ QUALITY THRESHOLDS
 # ═══════════════════════════════════════════════════════════
-IMAGE_QUALITY_MIN_BYTES = int(os.getenv("IMAGE_QUALITY_MIN_BYTES", "30000"))
-IMAGE_MIN_DIMENSION = int(os.getenv("IMAGE_MIN_DIMENSION", "512"))
-MAX_REGENERATION_ATTEMPTS = int(os.getenv("MAX_REGENERATION_ATTEMPTS", "3"))
-QUALITY_SCORE_THRESHOLD = int(os.getenv("QUALITY_SCORE_THRESHOLD", "60"))
+IMAGE_QUALITY_MIN_BYTES = _env_int("IMAGE_QUALITY_MIN_BYTES", 30000, minimum=0)
+IMAGE_MIN_DIMENSION = _env_int("IMAGE_MIN_DIMENSION", 512, minimum=1)
+MAX_REGENERATION_ATTEMPTS = _env_int("MAX_REGENERATION_ATTEMPTS", 3, minimum=1)
+QUALITY_SCORE_THRESHOLD = _env_int("QUALITY_SCORE_THRESHOLD", 60, minimum=0)
 
 
 # ═══════════════════════════════════════════════════════════
 # 💾 DATABASE
 # ═══════════════════════════════════════════════════════════
 DB_PATH = os.getenv("DB_PATH", "divine_poster.db")
-DB_BACKUP_ENABLED = os.getenv("DB_BACKUP_ENABLED", "true").lower() == "true"
+DB_BACKUP_ENABLED = _env_bool("DB_BACKUP_ENABLED", True)
 
 
 # ═══════════════════════════════════════════════════════════
 # 📊 ANALYTICS
 # ═══════════════════════════════════════════════════════════
-ANALYTICS_ENABLED = os.getenv("ANALYTICS_ENABLED", "true").lower() == "true"
-ANALYTICS_FETCH_DELAY_MINUTES = int(os.getenv("ANALYTICS_FETCH_DELAY_MINUTES", "60"))
-INSIGHTS_MIN_POSTS = int(os.getenv("INSIGHTS_MIN_POSTS", "3"))
+ANALYTICS_ENABLED = _env_bool("ANALYTICS_ENABLED", True)
+ANALYTICS_FETCH_DELAY_MINUTES = _env_int("ANALYTICS_FETCH_DELAY_MINUTES", 60, minimum=0)
+INSIGHTS_MIN_POSTS = _env_int("INSIGHTS_MIN_POSTS", 3, minimum=1)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -130,20 +178,20 @@ INSIGHTS_MIN_POSTS = int(os.getenv("INSIGHTS_MIN_POSTS", "3"))
 # ═══════════════════════════════════════════════════════════
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 LOG_DIR = os.getenv("LOG_DIR", "logs")
-LOG_KEEP_DAYS = int(os.getenv("LOG_KEEP_DAYS", "30"))
+LOG_KEEP_DAYS = _env_int("LOG_KEEP_DAYS", 30, minimum=1)
 
 
 # ═══════════════════════════════════════════════════════════
 # 🚀 PERFORMANCE
 # ═══════════════════════════════════════════════════════════
-ENABLE_CACHING = os.getenv("ENABLE_CACHING", "true").lower() == "true"
-PARALLEL_UPLOAD = os.getenv("PARALLEL_UPLOAD", "false").lower() == "true"
+ENABLE_CACHING = _env_bool("ENABLE_CACHING", True)
+PARALLEL_UPLOAD = _env_bool("PARALLEL_UPLOAD", False)
 
 
 # ═══════════════════════════════════════════════════════════
 # 🆕 V2 - GOOGLE CLOUD TEXT-TO-SPEECH (Reels Voice)
 # ═══════════════════════════════════════════════════════════
-TTS_ENABLED = os.getenv("TTS_ENABLED", "true").lower() == "true"
+TTS_ENABLED = _env_bool("TTS_ENABLED", True)
 TTS_LANGUAGE = os.getenv("TTS_LANGUAGE", "hi-IN")
 
 # Hindi Neural2 voices (best quality)
@@ -151,8 +199,8 @@ TTS_VOICE_MALE = os.getenv("TTS_VOICE_MALE", "hi-IN-Neural2-B")
 TTS_VOICE_FEMALE = os.getenv("TTS_VOICE_FEMALE", "hi-IN-Neural2-A")
 
 # Speech parameters
-TTS_SPEAKING_RATE = float(os.getenv("TTS_SPEAKING_RATE", "0.95"))
-TTS_PITCH = float(os.getenv("TTS_PITCH", "0.0"))
+TTS_SPEAKING_RATE = _env_float("TTS_SPEAKING_RATE", 0.95, minimum=0.25)
+TTS_PITCH = _env_float("TTS_PITCH", 0.0)
 TTS_AUDIO_ENCODING = "MP3"
 
 # Category → Voice gender mapping (User's choice)
@@ -179,19 +227,19 @@ TTS_CATEGORY_VOICE = {
 # ═══════════════════════════════════════════════════════════
 
 # Duration (Instagram Reels max = 90s, YT Shorts max = 60s)
-REEL_DURATION_MIN = int(os.getenv("REEL_DURATION_MIN", "60"))
-REEL_DURATION_MAX = int(os.getenv("REEL_DURATION_MAX", "90"))
+REEL_DURATION_MIN = _env_int("REEL_DURATION_MIN", 60, minimum=1)
+REEL_DURATION_MAX = _env_int("REEL_DURATION_MAX", 90, minimum=1)
 
 # Video specs (9:16 portrait for all platforms)
-REEL_FPS = int(os.getenv("REEL_FPS", "30"))
+REEL_FPS = _env_int("REEL_FPS", 30, minimum=1)
 REEL_WIDTH = 1080
 REEL_HEIGHT = 1920
 REEL_ASPECT_RATIO = "9:16"
 
 # Story parameters (Hindi narration)
-REEL_STORY_MIN_WORDS = int(os.getenv("REEL_STORY_MIN_WORDS", "150"))
-REEL_STORY_MAX_WORDS = int(os.getenv("REEL_STORY_MAX_WORDS", "180"))
-REEL_NUM_SCENES = int(os.getenv("REEL_NUM_SCENES", "6"))
+REEL_STORY_MIN_WORDS = _env_int("REEL_STORY_MIN_WORDS", 150, minimum=1)
+REEL_STORY_MAX_WORDS = _env_int("REEL_STORY_MAX_WORDS", 180, minimum=1)
+REEL_NUM_SCENES = _env_int("REEL_NUM_SCENES", 6, minimum=1)
 
 # Video encoding quality
 REEL_VIDEO_CODEC = "libx264"
@@ -221,13 +269,13 @@ REEL_SUBTITLE_BASE_COLOR = "#FFFFFF"       # White
 REEL_SUBTITLE_STROKE_COLOR = "#000000"     # Black outline
 
 # Reel posting time (1 PM IST)
-REEL_POSTING_HOUR = int(os.getenv("REEL_POSTING_HOUR", "13"))
+REEL_POSTING_HOUR = _env_int("REEL_POSTING_HOUR", 13, minimum=0)
 
 
 # ═══════════════════════════════════════════════════════════
 # 🆕 V2 - YOUTUBE SHORTS
 # ═══════════════════════════════════════════════════════════
-YOUTUBE_ENABLED = os.getenv("YOUTUBE_ENABLED", "true").lower() == "true"
+YOUTUBE_ENABLED = _env_bool("YOUTUBE_ENABLED", True)
 YOUTUBE_CHANNEL_ID = os.getenv("YOUTUBE_CHANNEL_ID", "")
 
 # OAuth credentials files (project-specific naming)
@@ -241,10 +289,21 @@ YOUTUBE_TOKEN_FILE = os.getenv(
 )
 
 # Upload settings
-YOUTUBE_CATEGORY_ID = "22"  # People & Blogs
-YOUTUBE_PRIVACY_STATUS = os.getenv("YOUTUBE_PRIVACY_STATUS", "public")
-YOUTUBE_MADE_FOR_KIDS = False
-YOUTUBE_UPLOAD_MAX_RETRIES = 3
+YOUTUBE_CATEGORY_ID = os.getenv("YOUTUBE_CATEGORY_ID", "22")
+YOUTUBE_PRIVACY_STATUS = os.getenv("YOUTUBE_PRIVACY_STATUS", "public").strip().lower()
+if YOUTUBE_PRIVACY_STATUS not in {"public", "unlisted", "private"}:
+    YOUTUBE_PRIVACY_STATUS = "public"
+YOUTUBE_MADE_FOR_KIDS = _env_bool("YOUTUBE_MADE_FOR_KIDS", False)
+YOUTUBE_UPLOAD_MAX_RETRIES = _env_int("YOUTUBE_UPLOAD_MAX_RETRIES", 3, minimum=1)
+
+# YouTube's official Data API cannot create a Community image post.  For the
+# morning image pipeline we therefore turn the generated image into a short,
+# portrait MP4 and upload that Short.  This is enabled separately so a failed
+# YouTube OAuth setup never prevents Instagram/Facebook publishing.
+YOUTUBE_IMAGE_ENABLED = _env_bool("YOUTUBE_IMAGE_ENABLED", True)
+YOUTUBE_IMAGE_DURATION_SECONDS = _env_int(
+    "YOUTUBE_IMAGE_DURATION_SECONDS", 8, minimum=1
+)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -255,16 +314,17 @@ FEATURES = {
     "vertex_ai": USE_VERTEX_AI,
     "pollinations_fallback": POLLINATIONS_ENABLED,
     "analytics": ANALYTICS_ENABLED,
-    "humanizer": os.getenv("ENABLE_HUMANIZER", "true").lower() == "true",
-    "duplicate_check": os.getenv("ENABLE_DUPLICATE_CHECK", "true").lower() == "true",
-    "self_learning": os.getenv("ENABLE_SELF_LEARNING", "true").lower() == "true",
-    "festival_detection": os.getenv("ENABLE_FESTIVAL_DETECTION", "true").lower() == "true",
-    "smart_scheduling": os.getenv("ENABLE_SMART_SCHEDULING", "true").lower() == "true",
+    "humanizer": _env_bool("ENABLE_HUMANIZER", True),
+    "duplicate_check": _env_bool("ENABLE_DUPLICATE_CHECK", True),
+    "self_learning": _env_bool("ENABLE_SELF_LEARNING", True),
+    "festival_detection": _env_bool("ENABLE_FESTIVAL_DETECTION", True),
+    "smart_scheduling": _env_bool("ENABLE_SMART_SCHEDULING", True),
 
     # 🆕 V2
     "tts": TTS_ENABLED,
     "reels": True,
     "youtube": YOUTUBE_ENABLED,
+    "youtube_image_short": YOUTUBE_ENABLED and YOUTUBE_IMAGE_ENABLED,
     "video_watermark": True,
 }
 
@@ -373,6 +433,11 @@ def validate():
     print(f"   Client Secret : {YOUTUBE_CLIENT_SECRETS_FILE}")
     print(f"   Token File    : {YOUTUBE_TOKEN_FILE}")
     print(f"   Privacy       : {YOUTUBE_PRIVACY_STATUS}")
+    print(
+        f"   Image → Short : "
+        f"{'✅ YES' if YOUTUBE_ENABLED and YOUTUBE_IMAGE_ENABLED else '❌ NO'}"
+    )
+    print(f"   Image duration: {YOUTUBE_IMAGE_DURATION_SECONDS}s")
 
     # Schedule
     print("\n⏰ POSTING SCHEDULE")
@@ -433,10 +498,16 @@ def validate():
             "YouTube uploads will fail."
         )
 
+    if YOUTUBE_ENABLED and not os.path.exists(YOUTUBE_TOKEN_FILE):
+        warnings.append(
+            f"⚠️  YouTube token file missing: {YOUTUBE_TOKEN_FILE}. "
+            "Uploads need an OAuth token; run `python -m posting.youtube` first."
+        )
+
     if YOUTUBE_ENABLED and not os.path.exists(YOUTUBE_CLIENT_SECRETS_FILE):
         warnings.append(
-            f"⚠️  YouTube client secrets file missing: {YOUTUBE_CLIENT_SECRETS_FILE}. "
-            "Run OAuth setup first."
+            f"ℹ️  YouTube client secrets file missing: {YOUTUBE_CLIENT_SECRETS_FILE}. "
+            "Only needed for first-time OAuth setup; an existing token is enough to upload."
         )
 
     if warnings:
@@ -494,7 +565,9 @@ def get_config_summary() -> dict:
         "youtube": {
             "enabled": YOUTUBE_ENABLED,
             "channel_id": YOUTUBE_CHANNEL_ID,
-            "privacy": YOUTUBE_PRIVACY_STATUS
+            "privacy": YOUTUBE_PRIVACY_STATUS,
+            "image_enabled": YOUTUBE_IMAGE_ENABLED,
+            "image_duration_seconds": YOUTUBE_IMAGE_DURATION_SECONDS,
         },
         "features": FEATURES
     }
