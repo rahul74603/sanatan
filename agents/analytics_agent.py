@@ -254,6 +254,8 @@ def _fetch_fb_analytics(post_id: str, retries: int = 3) -> dict:
         return {}
 
     fields = "likes.summary(true),comments.summary(true),shares,reactions.summary(true)"
+    # Video / Reel objects reject `shares`/`reactions` → fall back to basics.
+    fallback_fields = "likes.summary(true),comments.summary(true)"
 
     for attempt in range(1, retries + 1):
         try:
@@ -263,6 +265,17 @@ def _fetch_fb_analytics(post_id: str, retries: int = 3) -> dict:
                 params={'fields': fields, 'access_token': ACCESS_TOKEN},
                 timeout=15
             )
+
+            # 400 → unsupported fields for this object type (e.g. video reels).
+            # Retry once with the reduced field set instead of failing 3x.
+            if response.status_code == 400 and fields != fallback_fields:
+                try:
+                    err = response.json().get('error', {}).get('message', '')[:120]
+                except Exception:
+                    err = ''
+                logger.warning(f"⚠️ FB 400 (fields rejected: {err}) → basic fields retry")
+                fields = fallback_fields
+                continue
 
             if response.status_code == 200:
                 data = response.json()
@@ -279,7 +292,11 @@ def _fetch_fb_analytics(post_id: str, retries: int = 3) -> dict:
                 logger.warning(f"⚠️ FB rate limited (attempt {attempt})")
                 time.sleep(10 * attempt)
             else:
-                logger.warning(f"FB API returned {response.status_code}")
+                try:
+                    err = response.json().get('error', {}).get('message', '')[:120]
+                except Exception:
+                    err = ''
+                logger.warning(f"FB API returned {response.status_code}: {err}")
                 if attempt < retries:
                     time.sleep(3)
 

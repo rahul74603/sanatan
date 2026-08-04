@@ -24,6 +24,7 @@ Setup Flow (one-time):
 5. Copy token JSON content to GitHub secret: YOUTUBE_TOKEN_JSON
 """
 import os
+import re
 import time
 import tempfile
 from pathlib import Path
@@ -127,24 +128,46 @@ def _load_credentials() -> Optional[Credentials]:
     token_path = Path(YOUTUBE_TOKEN_FILE)
 
     # Try loading saved token
-    if token_path.exists():
-        try:
-            creds = Credentials.from_authorized_user_file(
-                str(token_path),
-                SCOPES
-            )
-            logger.info(f"✅ Loaded YouTube token from {token_path.name}")
-            logger.info(
-                f"🔐 YouTube scopes requested: {SCOPES} | "
-                f"token_scopes: {getattr(creds, 'scopes', None)} | "
-                f"expired: {getattr(creds, 'expired', None)}"
-            )
-        except Exception as e:
-            logger.warning(f"⚠️  Failed to load token: {e}")
-            creds = None
+    if not token_path.exists():
+        logger.error(
+            f"❌ YouTube token file NOT FOUND: {YOUTUBE_TOKEN_FILE}. "
+            "GitHub Actions में 'YOUTUBE_TOKEN_JSON' secret सेट करें "
+            "(python -m posting.youtube चलाकर नया token बनाएं और उसकी "
+            "पूरी JSON content को secret में paste करें)."
+        )
+        return None
+
+    if token_path.stat().st_size < 50:
+        logger.error(
+            f"❌ YouTube token file खाली है: {YOUTUBE_TOKEN_FILE} "
+            "(secret सही से write नहीं हुआ). YOUTUBE_TOKEN_JSON secret check करें."
+        )
+        return None
+
+    try:
+        creds = Credentials.from_authorized_user_file(
+            str(token_path),
+            SCOPES
+        )
+        logger.info(f"✅ Loaded YouTube token from {token_path.name}")
+        logger.info(
+            f"🔐 YouTube scopes requested: {SCOPES} | "
+            f"token_scopes: {getattr(creds, 'scopes', None)} | "
+            f"expired: {getattr(creds, 'expired', None)}"
+        )
+    except Exception as e:
+        logger.warning(f"⚠️  Failed to load token: {e}")
+        creds = None
 
     # Refresh if expired
-    if creds and creds.expired and creds.refresh_token:
+    if creds and creds.expired:
+        if not creds.refresh_token:
+            logger.error(
+                "❌ Token expired और refresh_token missing है. "
+                "नया OAuth token बनाएं: python -m posting.youtube"
+            )
+            return None
+
         try:
             logger.info("🔄 Refreshing expired YouTube token...")
             creds.refresh(Request())
@@ -191,8 +214,12 @@ def _load_credentials() -> Optional[Credentials]:
         return creds
 
     logger.error(
-        f"❌ No valid YouTube credentials. "
-        f"Run: python -m posting.youtube (for initial OAuth setup)"
+        f"❌ No valid YouTube credentials "
+        f"(token loaded: {creds is not None}, expired: "
+        f"{getattr(creds, 'expired', 'n/a')}). "
+        f"नया token बनाएं: python -m posting.youtube — फिर पूरी "
+        f"sanatani_youtube_token.json content को GitHub secret "
+        f"YOUTUBE_TOKEN_JSON में update करें."
     )
     return None
 
@@ -485,10 +512,17 @@ def _generate_seo_description(
                  "spiritual motivation, daily wisdom, Indian culture")
     parts.append("")
 
-    # Part 5: Hashtags
-    if hashtags:
-        parts.append(hashtags)
-    parts.append("#Shorts #SanatanDharma #Spiritual #Hindu #Devotional #SanataniSoch")
+    # Part 5: Hashtags (deduped with the brand tag line so no tag repeats)
+    brand_tags = "#Shorts #SanatanDharma #Spiritual #Hindu #Devotional #SanataniSoch"
+    seen = set()
+    merged = []
+    for raw in (f"{hashtags} {brand_tags}").split():
+        tag = raw.strip()
+        key = tag.lower()
+        if tag and key not in seen:
+            seen.add(key)
+            merged.append(tag)
+    parts.append(" ".join(merged))
 
     return "\n".join(parts)
 
@@ -592,22 +626,61 @@ def _prepare_title(title: str, add_shorts_tag: bool = True) -> str:
     return title.strip()
 
 
+def _extract_hashtag_words(text: str) -> set:
+    """Return all unique hashtag words (with #) present in a text."""
+    if not text:
+        return set()
+    return set(re.findall(r"#[\w\u0900-\u097F]+", text))
+
+
+def _dedupe_hashtags(description: str, hashtags: str) -> str:
+    """Return only the hashtags from `hashtags` missing in `description`.
+
+    SEO descriptions already end with the full hashtag block (see
+    ``seo_agent.YT_DESCRIPTION_TEMPLATE`` and ``_generate_seo_description``).
+    Blindly appending the same block again created the "double hashtags"
+    appearing on every posted video.
+    """
+    hashtags = (hashtags or "").strip()
+    if not hashtags:
+        return ""
+
+    existing = _extract_hashtag_words(description)
+    if not existing:
+        return hashtags
+
+    existing_lower = {t.lower() for t in existing}
+    missing = [t.strip() for t in hashtags.split() if t.strip()
+               and t.strip().lower() not in existing_lower]
+
+    if not missing:
+        logger.info("ℹ️  Hashtags already in description — duplicates skipped")
+        return ""
+    if len(missing) < len(hashtags.split()):
+        logger.info(f"ℹ️  Hashtag dedup: {len(hashtags.split())} → {len(missing)} unique")
+
+    return " ".join(missing)
+
+
 def _prepare_description(
     description: str,
     hashtags: str = "",
     add_shorts_tag: bool = True
 ) -> str:
-    """Prepare video description"""
+    """Prepare video description (no duplicate hashtags)"""
     parts = []
 
     if description:
         parts.append(description)
 
-    if hashtags or add_shorts_tag:
+    # Only append hashtags that are not already present in the description.
+    deduped = _dedupe_hashtags(description or "", hashtags)
+
+    if deduped or add_shorts_tag:
         parts.append("")
 
-    if hashtags:
-        parts.append(hashtags)
+    if deduped:
+        parts.append(deduped)
 
     combined = "\n".join(parts)
     if add_shorts_tag and "#shorts" not in combined.lower():
