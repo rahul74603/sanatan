@@ -89,6 +89,33 @@ def _get_bucket():
     return client.bucket(BUCKET_NAME)
 
 
+def _get_accessible_url(blob, expiration: timedelta) -> str:
+    """
+    Return a URL that Meta/YouTube can fetch without Google credentials.
+
+    Some GCS buckets reject ``make_public`` when uniform bucket-level access is
+    enabled. Previously that made every upload fail, so Instagram never even
+    received an image URL. A signed URL is a safe fallback and is still
+    directly fetchable by the platform crawlers.
+    """
+    try:
+        blob.make_public()
+        return blob.public_url
+    except Exception as public_error:
+        logger.warning(
+            f"⚠️  Bucket does not allow object-public ACL; using signed URL: "
+            f"{public_error}"
+        )
+        kwargs = {
+            "expiration": expiration,
+            "method": "GET",
+        }
+        content_type = getattr(blob, "content_type", None)
+        if content_type:
+            kwargs["response_type"] = content_type
+        return blob.generate_signed_url(**kwargs)
+
+
 # ============================================================
 # UPLOAD HELPERS
 # ============================================================
@@ -261,10 +288,10 @@ def upload_image(
                 timeout=60
             )
 
-            # Make public if requested
+            # Make public if requested.  Fall back to a signed URL for
+            # uniform-access buckets; the returned URL remains platform-safe.
             if make_public:
-                blob.make_public()
-                url = blob.public_url
+                url = _get_accessible_url(blob, expiration=timedelta(days=7))
             else:
                 # Return signed URL (valid for 7 days)
                 url = blob.generate_signed_url(
@@ -398,11 +425,11 @@ def upload_video(
                 timeout=VIDEO_UPLOAD_TIMEOUT
             )
 
-            # Make public (REQUIRED for social media APIs)
+            # Make public (REQUIRED for social media APIs).  If object ACLs
+            # are disabled, use a signed URL instead of failing the upload.
             if make_public:
-                blob.make_public()
-                url = blob.public_url
-                logger.info(f"🌐 Made public")
+                url = _get_accessible_url(blob, expiration=timedelta(days=30))
+                logger.info(f"🌐 Media URL ready (public or signed fallback)")
             else:
                 # Signed URL valid for 30 days (longer for videos)
                 url = blob.generate_signed_url(

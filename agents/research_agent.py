@@ -310,28 +310,50 @@ def _get_fallback(category: str) -> dict:
 # GEMINI CALL
 # ============================================================
 
-def _call_gemini(prompt: str) -> dict:
-    """Call Gemini with bulletproof parsing"""
+def _call_gemini(prompt: str, strict_json: bool = True) -> dict:
+    """Call Gemini with bulletproof parsing.
+
+    strict_json=True requests Gemini's JSON output mode, which virtually
+    eliminates the recurring "All JSON strategies failed" first-attempt
+    failures seen when the model returns prose instead of JSON. If the
+    model alias does not support JSON mode, it retries without it.
+    """
 
     model = genai.GenerativeModel(GEMINI_MODEL)
 
-    generation_config = {
-        "temperature":      0.8,
-        "max_output_tokens": 800,  # V2.1: Increased from 600
-        "top_p":            0.95,
-    }
+    attempts = [True, False] if strict_json else [False]
 
-    response = model.generate_content(
-        prompt,
-        generation_config=generation_config
-    )
+    for use_json_mode in attempts:
+        generation_config = {
+            "temperature":      0.8,
+            "max_output_tokens": 800,  # V2.1: Increased from 600
+            "top_p":            0.95,
+        }
+        if use_json_mode:
+            generation_config["response_mime_type"] = "application/json"
 
-    raw = _extract_response_text(response)
+        try:
+            response = model.generate_content(
+                prompt,
+                generation_config=generation_config
+            )
+        except Exception as e:
+            # Model alias may not support JSON mode — retry plain-text mode.
+            if use_json_mode:
+                logger.warning(f"⚠️  JSON mode unsupported, retrying plain: {e}")
+                continue
+            raise
 
-    # V2.1: Use bulletproof parser
-    data = _parse_json_bulletproof(raw)
+        raw = _extract_response_text(response)
+        if not raw or not raw.strip():
+            raise ValueError("Gemini returned an empty response")
 
-    return data
+        # V2.1: Use bulletproof parser
+        data = _parse_json_bulletproof(raw)
+
+        return data
+
+    raise Exception("Gemini call failed")
 
 
 # ============================================================
@@ -405,7 +427,18 @@ Use authentic Indian spiritual context."""
         try:
             logger.info(f"Gemini attempt {attempt}/{max_retries}")
 
-            data = _call_gemini(prompt)
+            # On retries, nudge the model to return ONLY the JSON object —
+            # a fresh prompt often breaks the model's earlier refusal/prose.
+            retry_prompt = prompt
+            if attempt > 1:
+                retry_prompt = (
+                    prompt +
+                    "\n\nIMPORTANT: Previous attempt was invalid. "
+                    "Respond with NOTHING except the JSON object. "
+                    "No greetings, no explanations, no markdown."
+                )
+
+            data = _call_gemini(retry_prompt)
             data = _validate_research_data(data)
 
             # Save to memory

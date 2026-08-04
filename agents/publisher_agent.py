@@ -13,6 +13,7 @@ Features:
 import requests
 import time
 import random
+import re
 import json as json_lib
 from datetime import datetime
 from typing import Optional
@@ -59,7 +60,17 @@ REEL_MAX_STATUS_CHECKS    = 30   # Max 30 checks (2.5 min total)
 # ============================================================
 
 def _validate_token() -> tuple:
-    """Token valid है या नहीं check करो"""
+    """Validate required Meta configuration and, when possible, the token.
+
+    ``/me`` is not supported by every Instagram system/user token. A 400 from
+    this diagnostic endpoint must therefore not stop a valid Instagram post;
+    the actual publish endpoint is the source of truth.
+    """
+    if not ACCESS_TOKEN:
+        return False, "ACCESS_TOKEN missing"
+    if not INSTAGRAM_ACCOUNT_ID:
+        return False, "INSTAGRAM_ACCOUNT_ID missing"
+
     try:
         url = f"{META_BASE_URL}/me"
         response = requests.get(
@@ -71,42 +82,65 @@ def _validate_token() -> tuple:
             data = response.json()
             logger.info(f"✅ Token सही है: {data.get('name', 'अज्ञात')}")
             return True, ""
-        elif response.status_code == 401:
-            return False, "Token expired या invalid है"
-        else:
-            return False, f"Token check विफल: HTTP {response.status_code}"
+
+        error = _parse_meta_error(response)
+        # Code 190 / HTTP 401 is an actual expired/invalid token.
+        if response.status_code == 401 or error.get("code") == 190:
+            return False, f"Token expired या invalid है: {error.get('message', '')}".strip()
+
+        logger.warning(
+            f"⚠️  Token preflight inconclusive (HTTP {response.status_code}); "
+            "actual publish जारी रहेगा"
+        )
+        return True, ""
     except Exception as e:
-        return False, f"Token check में error: {e}"
+        logger.warning(f"⚠️  Token preflight failed; actual publish जारी रहेगा: {e}")
+        return True, ""
+
+
+def _verify_remote_media_url(media_url: str, media_kind: str) -> bool:
+    """Check a remote image/video URL without downloading its full body.
+
+    A few CDNs (and some GCS configurations) do not implement HEAD correctly.
+    In that case use a small streamed GET so a false HEAD response does not
+    make a valid URL look broken to the publisher.
+    """
+    if not media_url or not isinstance(media_url, str):
+        return False
+
+    expected = f"{media_kind}/"
+    try:
+        response = requests.head(media_url, timeout=10, allow_redirects=True)
+        content_type = response.headers.get('Content-Type', '').lower()
+        if response.status_code == 200 and expected in content_type:
+            logger.info(f"✅ {media_kind.title()} URL सही है ({content_type})")
+            return True
+
+        # HEAD is not reliable for every public GCS/CDN URL → streamed GET.
+        response = requests.get(
+            media_url,
+            timeout=(10, 20),
+            allow_redirects=True,
+            stream=True,
+        )
+        content_type = response.headers.get('Content-Type', '').lower()
+        ok = response.status_code == 200 and expected in content_type
+        if ok:
+            logger.info(f"✅ {media_kind.title()} URL GET से verify हुआ ({content_type})")
+        return ok
+    except Exception as e:
+        logger.warning(f"⚠️  {media_kind.title()} URL check विफल: {e}")
+        return False
 
 
 def _verify_image_url(image_url: str) -> bool:
     """Image URL accessible है या नहीं"""
-    try:
-        response = requests.head(image_url, timeout=10, allow_redirects=True)
-        if response.status_code == 200:
-            content_type = response.headers.get('Content-Type', '')
-            if 'image' in content_type:
-                logger.info(f"✅ Image URL सही है ({content_type})")
-                return True
-        return False
-    except Exception as e:
-        logger.warning(f"⚠️  Image URL check विफल: {e}")
-        return False
+    return _verify_remote_media_url(image_url, "image")
 
 
 def _verify_video_url(video_url: str) -> bool:
     """🆕 Video URL accessible है या नहीं"""
-    try:
-        response = requests.head(video_url, timeout=10, allow_redirects=True)
-        if response.status_code == 200:
-            content_type = response.headers.get('Content-Type', '')
-            if 'video' in content_type:
-                logger.info(f"✅ Video URL सही है ({content_type})")
-                return True
-        return False
-    except Exception as e:
-        logger.warning(f"⚠️  Video URL check विफल: {e}")
-        return False
+    return _verify_remote_media_url(video_url, "video")
 
 
 def _parse_meta_error(response: requests.Response) -> dict:
@@ -169,6 +203,11 @@ def _is_media_id_expired(slide: dict) -> bool:
 # ============================================================
 
 def _post_instagram_container(image_url: str, caption: str) -> dict:
+    if not INSTAGRAM_ACCOUNT_ID:
+        return {"success": False, "error": {"message": "INSTAGRAM_ACCOUNT_ID missing"}}
+    if not ACCESS_TOKEN:
+        return {"success": False, "error": {"message": "ACCESS_TOKEN missing"}}
+
     url = f"{META_BASE_URL}/{INSTAGRAM_ACCOUNT_ID}/media"
     for attempt in range(1, MAX_RETRIES + 1):
         try:
@@ -182,11 +221,11 @@ def _post_instagram_container(image_url: str, caption: str) -> dict:
                 },
                 timeout=REQUEST_TIMEOUT
             )
-            if response.status_code == 200:
+            if response.status_code in (200, 201):
                 creation_id = response.json().get('id')
                 if creation_id:
                     logger.info(f"✅ Container तैयार: {creation_id}")
-                    return {"success": True, "creation_id": creation_id}
+                    return {"success": True, "creation_id": str(creation_id)}
                 raise Exception("Response में creation_id नहीं आया")
 
             error = _parse_meta_error(response)
@@ -225,11 +264,11 @@ def _publish_instagram_container(creation_id: str) -> dict:
                 },
                 timeout=REQUEST_TIMEOUT
             )
-            if response.status_code == 200:
+            if response.status_code in (200, 201):
                 post_id = response.json().get('id')
                 if post_id:
                     logger.info(f"✅ IG पब्लिश हो गया: {post_id}")
-                    return {"success": True, "post_id": post_id}
+                    return {"success": True, "post_id": str(post_id)}
 
             error = _parse_meta_error(response)
             logger.warning(f"⚠️  Publish विफल: {error['message']}")
@@ -250,32 +289,54 @@ def _publish_instagram_container(creation_id: str) -> dict:
 
 
 def post_to_instagram(image_url: str, caption: str) -> dict:
-    """Single image IG posting"""
+    """Single image IG posting.
+
+    Instagram containers are asynchronous: a fixed short sleep before
+    media_publish is the classic reason valid images fail with
+    "media not ready" errors. Always poll until the container is
+    FINISHED before publishing.
+    """
+    if not image_url:
+        return {"success": False, "post_id": "", "error": "Image URL खाली है"}
+
     try:
         container_result = _post_instagram_container(image_url, caption)
-        if not container_result["success"]:
+        if not container_result.get("success"):
+            error = container_result.get("error", {}) or {}
             return {
                 "success": False,
                 "post_id": "",
-                "error":   container_result["error"].get("message", "Container विफल")
+                "error":   error.get("message", "Instagram container नहीं बना")
             }
 
-        logger.info(f"⏳ IG processing के लिए {INSTAGRAM_PROCESSING_WAIT}s रुकते हैं...")
-        time.sleep(INSTAGRAM_PROCESSING_WAIT)
+        creation_id = container_result["creation_id"]
+        logger.info(f"⏳ IG image container तैयार होने का इंतज़ार (अधिकतम 90s): {creation_id}")
 
-        publish_result = _publish_instagram_container(container_result["creation_id"])
-        if publish_result["success"]:
+        if not _wait_for_container_ready(creation_id, max_wait=90):
+            return {
+                "success": False,
+                "post_id": "",
+                "container_id": creation_id,
+                "error": "Instagram image container FINISHED नहीं हुआ (processing timeout)"
+            }
+
+        publish_result = _publish_instagram_container(creation_id)
+        if publish_result.get("success"):
             return {
                 "success":      True,
                 "post_id":      publish_result["post_id"],
-                "container_id": container_result["creation_id"]
+                "container_id": creation_id
             }
+
+        error = publish_result.get("error", {}) or {}
         return {
             "success": False,
             "post_id": "",
-            "error":   publish_result["error"].get("message", "Publish विफल")
+            "container_id": creation_id,
+            "error":   error.get("message", "Instagram publish विफल")
         }
     except Exception as e:
+        logger.error(f"❌ Instagram image publish error: {e}")
         return {"success": False, "post_id": "", "error": str(e)}
 
 
@@ -331,11 +392,54 @@ def post_to_facebook(image_url: str, caption: str) -> dict:
 # CAPTION PREPARATION
 # ============================================================
 
+def _extract_hashtags(text: str) -> set:
+    """Return all unique hashtag words (with #) present in a text."""
+    if not text:
+        return set()
+    return set(re.findall(r'#[\w\u0900-\u097F]+', text))
+
+
+def _dedupe_hashtags(text: str, hashtags: str) -> str:
+    """Append only hashtags that are not already present in `text`.
+
+    LLM captions / recovery state sometimes already contain a hashtag block;
+    blindly appending again produces the "double hashtags" posts users see.
+    """
+    hashtags = (hashtags or "").strip()
+    if not hashtags:
+        return ""
+
+    existing = _extract_hashtags(text)
+    if not existing:
+        return hashtags
+
+    missing = []
+    for tag in hashtags.split():
+        tag = tag.strip()
+        if not tag:
+            continue
+        if tag.lower() not in {t.lower() for t in existing}:
+            missing.append(tag)
+
+    if not missing:
+        logger.info("ℹ️  सभी hashtags caption में पहले से मौजूद — duplicate नहीं जोड़े")
+        return ""
+
+    if len(missing) < len(hashtags.split()):
+        logger.info(f"ℹ️  Hashtag dedup: {len(hashtags.split())} → {len(missing)} unique")
+
+    return " ".join(missing)
+
+
 def _prepare_caption(caption: str, hashtags: str, post_type: str = "image") -> str:
-    """V4: SEO-optimized caption with proper spacing, without duplicate CTAs."""
+    """V4: SEO-optimized caption with proper spacing, without duplicate CTAs.
+
+    Hashtags that are already present in the caption are not appended again
+    (fixes the recurring "double hashtags" on IG/FB posts).
+    """
 
     caption = (caption or "").strip()
-    hashtags = (hashtags or "").strip()
+    hashtags = _dedupe_hashtags(caption, hashtags or "")
 
     # Add follow CTA only if caption doesn't already contain the handle/CTA.
     caption_lower = caption.lower()
@@ -364,18 +468,18 @@ def _log_publishing_report(memory: AgentMemory, ig_result: dict, fb_result: dict
     logger.info("├─────────────────────────────────────────────┤")
     logger.info(f"│ ⏱️  समय       : {duration:.1f}s")
     logger.info("├─────────────────────────────────────────────┤")
-    ig_ok = ig_result["success"]
-    fb_ok = fb_result["success"]
+    ig_ok = bool(ig_result.get("success"))
+    fb_ok = bool(fb_result.get("success"))
     logger.info(f"│ 📸 INSTAGRAM: {'✅ पब्लिश' if ig_ok else '❌ विफल'}")
     if ig_ok:
-        logger.info(f"│    Post ID  : {ig_result['post_id']}")
+        logger.info(f"│    Post ID  : {ig_result.get('post_id', '')}")
     else:
-        logger.info(f"│    Error    : {ig_result.get('error', 'अज्ञात')[:35]}")
+        logger.info(f"│    Error    : {str(ig_result.get('error', 'अज्ञात'))[:35]}")
     logger.info(f"│ 📘 FACEBOOK : {'✅ पब्लिश' if fb_ok else '❌ विफल'}")
     if fb_ok:
-        logger.info(f"│    Post ID  : {fb_result['post_id']}")
+        logger.info(f"│    Post ID  : {fb_result.get('post_id', '')}")
     else:
-        logger.info(f"│    Error    : {fb_result.get('error', 'अज्ञात')[:35]}")
+        logger.info(f"│    Error    : {str(fb_result.get('error', 'अज्ञात'))[:35]}")
     logger.info("└─────────────────────────────────────────────┘")
 
 
@@ -462,17 +566,17 @@ def _wait_for_container_ready(container_id: str, max_wait: int = 60) -> bool:
                 detail = data.get('status', '')
                 logger.info(f"   ⏱️  Container स्थिति: {status} | {detail[:80]}")
 
-                if status == 'FINISHED':
+                if status in ('FINISHED', 'PUBLISHED'):
                     return True
                 elif status == 'ERROR':
                     error_count += 1
                     if error_count >= 2:
-                        logger.error(f"   ❌ Container ERROR (2 बार confirm)")
+                        logger.error(f"   ❌ Container ERROR (2 बार confirm): {detail[:180]}")
                         return False
                     logger.warning(f"   ⚠️  ERROR मिला, 5s बाद फिर check...")
                     time.sleep(5)
                     continue
-                elif status == 'IN_PROGRESS':
+                elif status in ('IN_PROGRESS', 'PENDING'):
                     logger.info(f"   ⏳ अभी process हो रहा है...")
             else:
                 logger.warning(f"   ⚠️  Status HTTP {r.status_code}: {r.text[:150]}")

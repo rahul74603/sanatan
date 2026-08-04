@@ -229,8 +229,26 @@ YT_DESCRIPTION_TEMPLATE = """{caption}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 🔍 Keywords: {all_keywords}
 
-{hashtags}
-#Shorts #SanatanDharma #Spiritual #Hindu #Devotional #SanataniSoch"""
+{hashtags}"""
+
+# Branded tag line — merged & deduped with the main hashtag block at build
+# time so no tag appears twice in the description.
+YT_BRAND_TAGS = "#Shorts #SanatanDharma #Spiritual #Hindu #Devotional #SanataniSoch"
+
+
+def _build_yt_hashtag_block(memory_hashtags: str) -> str:
+    """Combine memory hashtags + brand tags, deduped, preserving order."""
+    seen = set()
+    ordered = []
+    for raw in (memory_hashtags or "").split() + YT_BRAND_TAGS.split():
+        tag = raw.strip()
+        if not tag:
+            continue
+        key = tag.lower()
+        if key not in seen:
+            seen.add(key)
+            ordered.append(tag)
+    return " ".join(ordered)
 
 
 # ============================================================
@@ -291,11 +309,20 @@ def _get_trending_keywords(topic: str, category: str) -> dict:
     """
     Use Gemini to find trending keywords for this specific topic.
     Returns Hindi + English keywords.
-    """
-    try:
-        model = genai.GenerativeModel(GEMINI_MODEL)
 
-        prompt = f"""You are an SEO expert for Indian spiritual content.
+    V2: retries once, requests JSON mode, and tolerates flaky/empty
+    responses without failing the whole SEO agent (recurring log noise).
+    """
+    empty_result = {
+        "trending_hindi": [],
+        "trending_english": [],
+        "hook_line": "",
+        "english_description": ""
+    }
+
+    model = genai.GenerativeModel(GEMINI_MODEL)
+
+    prompt = f"""You are an SEO expert for Indian spiritual content.
 
 Topic: {topic}
 Category: {category}
@@ -313,37 +340,62 @@ Return ONLY valid JSON (no markdown):
 Focus on: spiritual, devotional, Hindu mythology keywords.
 Make keywords SEARCHABLE (what people actually type in search)."""
 
-        response = model.generate_content(
-            prompt,
-            generation_config={
+    last_error = None
+    for attempt in range(1, 3):  # 2 attempts
+        try:
+            generation_config = {
                 "temperature": 0.7,
                 "max_output_tokens": 500,
+                "response_mime_type": "application/json",
             }
-        )
+            try:
+                response = model.generate_content(
+                    prompt,
+                    generation_config=generation_config
+                )
+            except Exception as json_mode_error:
+                # Model alias may not support JSON output mode → plain mode.
+                logger.warning(f"⚠️  JSON mode unsupported, retrying plain: {json_mode_error}")
+                response = model.generate_content(
+                    prompt,
+                    generation_config={
+                        "temperature": 0.7,
+                        "max_output_tokens": 500,
+                    }
+                )
 
-        raw = _extract_response_text(response)
+            raw = _extract_response_text(response)
+            if not raw or raw == "{}":
+                raise ValueError("Gemini returned empty response")
 
-        # Clean JSON
-        raw = re.sub(r'```json\s*', '', raw)
-        raw = re.sub(r'```\s*', '', raw)
+            # Clean JSON
+            raw = re.sub(r'```json\s*', '', raw)
+            raw = re.sub(r'```\s*', '', raw)
 
-        start = raw.find('{')
-        end = raw.rfind('}')
-        if start != -1 and end != -1:
-            raw = raw[start:end + 1]
+            start = raw.find('{')
+            end = raw.rfind('}')
+            if start != -1 and end != -1:
+                raw = raw[start:end + 1]
 
-        result = json.loads(raw)
-        logger.info(f"✅ Gemini trending keywords fetched")
-        return result
+            result = json.loads(raw)
+            if not isinstance(result, dict):
+                raise ValueError("Response is not a JSON object")
 
-    except Exception as e:
-        logger.warning(f"⚠️  Trending keywords failed: {e}")
-        return {
-            "trending_hindi": [],
-            "trending_english": [],
-            "hook_line": "",
-            "english_description": ""
-        }
+            # Ensure all expected keys exist (Gemini sometimes omits fields)
+            for key in empty_result:
+                result.setdefault(key, [] if key.startswith("trending") else "")
+
+            logger.info(f"✅ Gemini trending keywords fetched (attempt {attempt})")
+            return result
+
+        except Exception as e:
+            last_error = e
+            logger.warning(f"⚠️  Trending keywords attempt {attempt} failed: {e}")
+            if attempt == 1:
+                time.sleep(2)
+
+    logger.warning(f"⚠️  Trending keywords failed after retries: {last_error}")
+    return empty_result
 
 
 # ============================================================
@@ -499,7 +551,7 @@ def _generate_yt_seo(memory: AgentMemory, trending: dict) -> dict:
         caption=memory.caption or "",
         english_description=english_desc,
         all_keywords=all_keywords,
-        hashtags=memory.hashtags or ""
+        hashtags=_build_yt_hashtag_block(memory.hashtags or "")
     )
 
     # SEO Tags

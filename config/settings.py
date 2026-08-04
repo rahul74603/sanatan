@@ -439,6 +439,14 @@ def validate():
             "Run OAuth setup first."
         )
 
+    if YOUTUBE_ENABLED and not os.path.exists(YOUTUBE_TOKEN_FILE):
+        warnings.append(
+            f"⚠️  YouTube token file missing: {YOUTUBE_TOKEN_FILE}. "
+            "YouTube uploads will fail. GitHub Actions में "
+            "YOUTUBE_TOKEN_JSON secret set करें (python -m posting.youtube "
+            "से token बनाएं)."
+        )
+
     if warnings:
         print("\n" + "─" * 60)
         print("⚠️  WARNINGS:")
