@@ -248,6 +248,51 @@ YOUTUBE_UPLOAD_MAX_RETRIES = 3
 
 
 # ═══════════════════════════════════════════════════════════
+# 🎛️ APP MODE — FREE / PRO / AUTO
+#
+#   free  → ₹0 cost. Images via FREE providers (Pollinations) only.
+#           No paid Vertex AI Imagen. Video/reels disabled →
+#           degrades to generating a picture instead.
+#
+#   pro   → Paid mode. Premium Vertex AI Imagen images + video reels
+#           (TTS, music, subtitles). Full quality.
+#
+#   auto  → Default. Start in PRO, but if the daily/monthly budget is
+#           exhausted (or paid generation fails) → auto-degrade to FREE
+#           so at least a picture always gets made.
+#
+# CLI se switch करो:  python main.py mode free|pro|auto
+# .env में set करो:   APP_MODE=free  |  APP_MODE=pro  |  APP_MODE=auto
+# ═══════════════════════════════════════════════════════════
+APP_MODE = os.getenv("APP_MODE", "auto").strip().lower()
+if APP_MODE not in ("free", "pro", "auto"):
+    APP_MODE = "auto"
+
+# Persistent mode override file (CLI `mode` command से update होता है)
+MODE_STATE_FILE = os.getenv(
+    "MODE_STATE_FILE",
+    os.path.join(os.getenv("LOG_DIR", "logs"), "mode_state.json")
+)
+
+# FREE mode में video banane ki hard-off flag.
+# V3: Default ab FALSE — kyunki user chahata hai ki FREE mode mein bhi video
+# bane agar free path possible ho (Pollinations free images + ffmpeg render).
+# Isko "true" karne par FREE mode mein video bilkul band → pic fallback.
+FREE_MODE_DISABLES_REELS = os.getenv(
+    "FREE_MODE_DISABLES_REELS", "false"
+).lower() == "true"
+
+# FREE mode mein video banane allow karo (agar free path available ho).
+FREE_MODE_ALLOWS_VIDEO = os.getenv(
+    "FREE_MODE_ALLOWS_VIDEO", "true"
+).lower() == "true"
+
+# 🎬 VIDEO FREQUENCY — har N din mein 1 video (default: 2 din)
+# Isko .env se badal sakte ho, e.g. VIDEO_EVERY_DAYS=3 → har 3 din mein 1 video.
+VIDEO_EVERY_DAYS = int(os.getenv("VIDEO_EVERY_DAYS", "2"))
+
+
+# ═══════════════════════════════════════════════════════════
 # 🎯 FEATURE FLAGS
 # ═══════════════════════════════════════════════════════════
 FEATURES = {
@@ -266,6 +311,12 @@ FEATURES = {
     "reels": True,
     "youtube": YOUTUBE_ENABLED,
     "video_watermark": True,
+
+    # 🆕 V3 — Mode system
+    "app_mode": APP_MODE,
+    "free_mode_disables_reels": FREE_MODE_DISABLES_REELS,
+    "free_mode_allows_video": FREE_MODE_ALLOWS_VIDEO,
+    "video_every_days": VIDEO_EVERY_DAYS,
 }
 
 
@@ -306,6 +357,16 @@ def validate():
     # DISPLAY CONFIGURATION SUMMARY
     # ═══════════════════════════════════════════
     print("\n✅ ALL REQUIRED CONFIGS PRESENT\n")
+
+    # App Mode
+    print("🎛️  APP MODE")
+    print(f"   Mode          : {APP_MODE.upper()}")
+    if APP_MODE == "free":
+        print(f"   → FREE (₹0): Images via Pollinations only, reels disabled")
+    elif APP_MODE == "pro":
+        print(f"   → PRO (paid): Premium Imagen + reels enabled")
+    else:
+        print(f"   → AUTO: PRO, budget खत्म → FREE fallback (pic guaranteed)")
 
     # Google Cloud
     print("📁 GOOGLE CLOUD")
@@ -504,7 +565,14 @@ def get_config_summary() -> dict:
             "channel_id": YOUTUBE_CHANNEL_ID,
             "privacy": YOUTUBE_PRIVACY_STATUS
         },
-        "features": FEATURES
+        "features": FEATURES,
+        "app_mode": {
+            "configured": APP_MODE,
+            "free_disables_reels": FREE_MODE_DISABLES_REELS,
+            "free_allows_video": FREE_MODE_ALLOWS_VIDEO,
+            "video_every_days": VIDEO_EVERY_DAYS,
+            "state_file": MODE_STATE_FILE
+        }
     }
 
 

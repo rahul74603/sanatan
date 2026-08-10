@@ -23,6 +23,14 @@ import functions_framework
 
 from core.database import initialize_database, save_post
 from core.memory import AgentMemory
+from core.mode_manager import (
+    get_mode_status,
+    can_use_video,
+    should_make_video,
+    is_video_day,
+    set_override_mode,
+    display_mode_status,
+)
 from core.recovery_manager import (
     find_pending_recovery,
     display_pending_recovery,
@@ -32,7 +40,7 @@ from core.recovery_manager import (
     delete_checkpoint,
     save_checkpoint,
 )
-from config.settings import validate, get_config_summary
+from config.settings import validate, get_config_summary, VIDEO_EVERY_DAYS
 from utils.logger import (
     get_logger,
     log_header,
@@ -1214,6 +1222,38 @@ def run_reel_pipeline(force_new: bool = False) -> dict:
     log_header(logger, "", char="═")
 
     # ═══════════════════════════════════════════
+    # 🎬 SHOULD WE MAKE A VIDEO? — 2-day rule + mode
+    # 1. Har VIDEO_EVERY_DAYS (default 2) din mein 1 video.
+    #    Non-video din → video nahi, picture banti hai.
+    # 2. PRO mode → video banao.
+    # 3. FREE mode → video sirf tab jab free video path ho
+    #    (FREE_MODE_ALLOWS_VIDEO + pipeline available); warna picture.
+    # Guarantee: video na bane to bhi kam se kam ek picture post ho jaye.
+    # ═══════════════════════════════════════════
+    if not should_make_video():
+        # Reason samjho — video day nahi tha ya mode video nahi allow karta
+        if not is_video_day():
+            reason = (
+                f"Aaj video day nahi hai (har {VIDEO_EVERY_DAYS} din mein "
+                f"1 video). Video ki jagah picture generate hui."
+            )
+        else:
+            reason = (
+                "Video day hai lekin mode video allow nahi karta "
+                "(FREE mode + free video unavailable). Picture generate hui."
+            )
+        logger.warning(
+            f"🎬 Video skip: {reason} "
+            f"Kam se kam pic to bane hi."
+        )
+        # Reel pipeline ki jagah single-image pipeline chalao
+        result = run_pipeline()
+        result["post_type"] = "image"
+        result["_mode_fallback"] = "video_day_skip_to_image"
+        result["message"] = reason
+        return result
+
+    # ═══════════════════════════════════════════
     # 🚨 DEPENDENCY CHECK (Phase 4-7 modules)
     # ═══════════════════════════════════════════
 
@@ -1372,7 +1412,24 @@ def run_reel_pipeline(force_new: bool = False) -> dict:
             fake_result.success = False
             fake_result.error = str(e)
             agent_results["reel_engine"] = fake_result
-            raise
+
+            # 🎛️ FALLBACK GUARANTEE: video nahi ban paya → kam se kam pic bane!
+            # (Recovery checkpoint हटाकर fresh image pipeline चलाते हैं taaki
+            #  half-built reel ki wajah se image pipeline atak na jaye.)
+            logger.warning(
+                "🎬 Reel build fail → 'kam se kam pic' fallback. "
+                "Single image generate + post kar rahe hain."
+            )
+            try:
+                delete_checkpoint(memory.session_id)
+            except Exception as ce:
+                logger.warning(f"Checkpoint delete fail: {ce}")
+
+            result = run_pipeline()
+            result["post_type"] = "image"
+            result["_mode_fallback"] = "reel_failed_to_image"
+            result["message"] = "Reel video fail → image fallback (pic post hui)"
+            return result
 
         # ═══════════════════════════════════════════
         # STEP 4: UPLOAD VIDEO TO GCS
@@ -1780,7 +1837,7 @@ def run_evening_smart() -> dict:
 
         return result
 
-    else:
+    elif content_type == "reel":
         logger.info("🎬 आज reel का दिन है — reel #2 pipeline चला रहे हैं")
         logger.info("")
 
@@ -1789,7 +1846,31 @@ def run_evening_smart() -> dict:
         # Add smart routing info
         result["smart_routing"] = {
             "decision": "reel",
-            "reason": f"Today ({today_name}) is NOT a carousel day",
+            "reason": (
+                f"Today ({today_name}) is NOT a carousel day and IS a video day"
+            ),
+            "carousel_days_this_week": schedule['carousel_day_names']
+        }
+
+        return result
+
+    else:
+        # 🆕 V3: Non-carousel, non-video day → image fallback (kam se kam pic)
+        logger.info(
+            "🖼️  आज न carousel का दिन, न video (reel) का दिन — "
+            "image fallback post kar rahe hain (kam se kam pic)."
+        )
+        logger.info("")
+
+        result = run_pipeline()
+        result["post_type"] = "image"
+        result["_mode_fallback"] = "evening_non_video_day_image"
+        result["smart_routing"] = {
+            "decision": "image",
+            "reason": (
+                f"Today ({today_name}) is NOT a carousel day and NOT a video day "
+                f"(har {VIDEO_EVERY_DAYS} din mein 1 video)"
+            ),
             "carousel_days_this_week": schedule['carousel_day_names']
         }
 
@@ -1873,6 +1954,17 @@ def _run_cli():
             print(f"   {'✅' if VIDEO_BUILDER_AVAILABLE else '❌'} video_builder (Phase 5)")
             print(f"   {'✅' if REEL_ENGINE_AVAILABLE else '❌'} reel_engine (Phase 6)")
             print(f"   {'✅' if UPLOAD_VIDEO_AVAILABLE else '❌'} upload_video (Phase 6)")
+
+            # 🎛️ V3: Mode status
+            mode = get_mode_status()
+            print(f"\n🎛️  APP MODE:")
+            print(f"   Configured : {mode['configured'].upper()}")
+            print(f"   Active     : {mode['resolved'].upper()}")
+            print(f"   Paid images: {'✅' if mode['can_use_paid_images'] else '❌ FREE only'}")
+            print(f"   Reels/video: {'✅' if mode['can_use_video'] else '❌ DISABLED → pic banegi'}")
+            print(f"   Video freq : har {mode['video_every_days']} din mein 1 video "
+                  f"({'🗓️ aaj video day' if mode['is_video_day'] else '🗓️ aaj video day nahi'})")
+            print("   (Video freq badlo: .env mein VIDEO_EVERY_DAYS=n)")
             return
 
         # ── CAROUSEL ─────────────────────────────────────────
@@ -1965,7 +2057,7 @@ def _run_cli():
                     print(f"📸 IG: {result['ig_post_id']}")
                 if result.get("fb_post_id"):
                     print(f"📘 FB: {result['fb_post_id']}")
-            else:
+            elif decision == "reel":
                 print(f"\n{'✅' if status == 'success' else '⚠️' if status == 'partial' else '❌'} "
                       f"Reel: {status}")
                 if result.get("video_url"):
@@ -1976,6 +2068,13 @@ def _run_cli():
                     print(f"📘 FB Reel: {result['fb_post_id']}")
                 if result.get("yt_video_id"):
                     print(f"📺 YT Short: https://youtube.com/shorts/{result['yt_video_id']}")
+            else:
+                print(f"\n{'✅' if status == 'success' else '⚠️' if status == 'partial' else '❌'} "
+                      f"Image: {status}")
+                if result.get("topic"):
+                    print(f"📌 Topic: {result.get('topic')}")
+                if result.get("image") and result['image'].get('url'):
+                    print(f"🖼️  Image: {result['image']['url']}")
 
             sys.exit(0 if status in ["success", "partial"] else 2)
         # ── 🆕 V3: ENGAGEMENT (Auto Comment Reply) ───────────
@@ -2101,6 +2200,21 @@ def _run_cli():
             try:
                 from utils.vertex_ai import log_session_stats, estimate_images_remaining
 
+                # 🎛️ V3: Mode status
+                mode = get_mode_status()
+                print("\n" + "═" * 55)
+                print("  🎛️  APP MODE")
+                print("═" * 55)
+                print(f"   Configured : {mode['configured'].upper()}")
+                print(f"   Active     : {mode['resolved'].upper()}")
+                print(f"   Paid images: {'✅ ALLOWED' if mode['can_use_paid_images'] else '❌ FREE only'}")
+                print(f"   Reels/video: {'✅ ENABLED' if mode['can_use_video'] else '❌ DISABLED → pic banegi'}")
+                print(f"   Video freq : har {mode['video_every_days']} din mein 1 video "
+                      f"({'🗓️ aaj video day' if mode['is_video_day'] else '🗓️ aaj video day nahi'})")
+                if mode.get('last_reason'):
+                    print(f"   Reason     : {mode['last_reason']}")
+                print("   (Switch: python main.py mode free|pro|auto, freq: VIDEO_EVERY_DAYS=n)")
+
                 print("\n" + "═" * 55)
                 print("  💰 आज का खर्च और उपयोग")
                 print("═" * 55)
@@ -2161,6 +2275,21 @@ def _run_cli():
                 print(f"❌ Cost fetch विफल: {e}")
             return
 
+        # ── 🎛️ MODE (FREE / PRO / AUTO switching) ─────────────
+        elif command == "mode":
+            if len(sys.argv) >= 3:
+                mode = sys.argv[2].lower()
+                if mode in ("free", "pro", "auto"):
+                    ok = set_override_mode(mode)
+                    if ok:
+                        print(f"\n✅ Mode set → {mode.upper()}")
+                else:
+                    print("\n❌ Invalid mode. Use: free | pro | auto")
+                    sys.exit(2)
+            # Status hamesha print karo
+            display_mode_status()
+            return
+
         # ── HELP ─────────────────────────────────────────────
         elif command == "help":
             print("""
@@ -2198,6 +2327,19 @@ def _run_cli():
 ║  python main.py health         → Health + deps    ║
 ║  python main.py cost           → Cost stats       ║
 ║  python main.py help           → This screen      ║
+║                                                   ║
+║  🆕 V3 MODE (FREE / PRO / AUTO):                  ║
+║  python main.py mode           → Status           ║
+║  python main.py mode free      → ₹0, sirf images  ║
+║  python main.py mode pro       → paid (premium)   ║
+║  python main.py mode auto      → pro, budget ⏳    ║
+║                                → free fallback    ║
+║  VIDEO FREQUENCY:                                  ║
+║  Har 2 din mein 1 video (default).                ║
+║  .env: VIDEO_EVERY_DAYS=3 → har 3 din mein 1      ║
+║  PRO mode → video bane. FREE mode → video sirf    ║
+║  tab jab free path ho, warna pic banegi.          ║
+║  Budget khatam par bhi kam se kam pic to ban hi.  ║
 ╚═══════════════════════════════════════════════════╝
             """)
             return

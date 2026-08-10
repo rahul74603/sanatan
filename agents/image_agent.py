@@ -17,6 +17,7 @@ from io import BytesIO
 from PIL import Image
 
 from core.memory import AgentMemory
+from core.mode_manager import is_free_mode
 from utils.gcs_helper import upload_image
 from utils.humanizer import humanize_image
 from utils.vertex_ai import generate_image_vertex
@@ -375,7 +376,21 @@ def _generate_image_smart(
     Smart generation:
       1. Gemini Imagen 4.0  (via vertex_ai.py — best quality)
       2. Pollinations AI    (FREE — always available)
+
+      🎛️ MODE AWARE:
+      - FREE mode → sirf Pollinations (₹0), paid Vertex kabhi call nahi.
+      - PRO / AUTO-with-budget → full paid chain with free fallback.
     """
+    # ── 🎛️ FREE MODE: paid Vertex/Imagen bypass ──────────────
+    if is_free_mode():
+        logger.info(
+            "🎛️  FREE MODE active → paid providers skip, sirf "
+            "Pollinations (₹0) use hoga."
+        )
+        return _generate_with_pollinations(
+            prompt=prompt, category=category, max_retries=max_retries
+        )
+
     # ── Primary: Gemini Imagen 4.0 ────────────────────────────
     if USE_GEMINI_PRIMARY:
         try:
