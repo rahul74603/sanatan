@@ -514,22 +514,33 @@ def get_todays_content_type(time_slot: str = "evening") -> str:
         time_slot: "morning" | "afternoon" | "evening"
 
     Returns:
-        "image"    → For morning (8 AM)
-        "reel"     → For afternoon (1 PM) OR evening on non-carousel days
-        "carousel" → For evening on carousel days
+        "image"    → Morning (8 AM) ya non-video day par fallback
+        "reel"     → Video day par (har VIDEO_EVERY_DAYS din mein 1)
+        "carousel" → Evening par carousel days
+
+    V3: Reels ab har din nahi — har VIDEO_EVERY_DAYS (default 2) din mein 1
+    video banti hai. Non-video din par us slot mein image fallback hoti hai
+    (kam se kam pic to bane hi).
     """
+    from core.mode_manager import is_video_day
+
     if time_slot == "morning":
         return "image"
 
     if time_slot == "afternoon":
-        return "reel"  # Always reel at 1 PM
+        # Reel sirf video day par; warna image fallback
+        if is_video_day():
+            return "reel"
+        return "image"
 
     if time_slot == "evening":
-        # Check if today is carousel day
+        # Carousel day → carousel
         if is_today_carousel_day():
             return "carousel"
-        else:
+        # Non-carousel day → reel sirf video day par; warna image
+        if is_video_day():
             return "reel"
+        return "image"
 
     # Default fallback
     return "reel"
@@ -581,8 +592,12 @@ def get_schedule_history(weeks: int = 4) -> list:
 
 
 def display_schedule():
-    """🆕 Print beautiful schedule info"""
+    """🆕 Print beautiful schedule info (V3: reels har 2 din mein 1)"""
     schedule = get_carousel_days_this_week()
+
+    # 🆕 V3: Video days — har VIDEO_EVERY_DAYS din mein 1 video
+    from core.mode_manager import is_video_day
+    from config.settings import VIDEO_EVERY_DAYS
 
     logger.info("")
     logger.info("╔══════════════════════════════════════════════╗")
@@ -590,11 +605,13 @@ def display_schedule():
     logger.info("╠══════════════════════════════════════════════╣")
     logger.info(f"║ Week   : {schedule['week_start']} to {schedule['week_end']}")
     logger.info(f"║ Status : {'🆕 New' if schedule['is_new'] else '✅ Existing'}")
+    logger.info(f"║ Videos : har {VIDEO_EVERY_DAYS} din mein 1 (mode ke hisaab se)")
     logger.info("╠══════════════════════════════════════════════╣")
     logger.info("║ DAILY PATTERN:")
     logger.info("║ ")
 
     today_weekday = datetime.now().weekday()
+    today_is_video_day = is_video_day()
 
     for day_num in range(7):
         day_name = DAY_NAMES[day_num]
@@ -602,17 +619,16 @@ def display_schedule():
         is_today = day_num == today_weekday
 
         marker = "👉" if is_today else "  "
-
+        video_tag = " + 🎬 Reel" if (is_today and today_is_video_day) else ""
+        # Non-video days / non-today days: sirf image (+ carousel)
         if is_carousel:
-            logger.info(f"║ {marker} {day_name:10} → 📸 Image + 🎬 Reel + 🎠 Carousel")
+            logger.info(f"║ {marker} {day_name:10} → 📸 Image + 🎠 Carousel{video_tag}")
         else:
-            logger.info(f"║ {marker} {day_name:10} → 📸 Image + 🎬 Reel + 🎬 Reel")
+            logger.info(f"║ {marker} {day_name:10} → 📸 Image{video_tag}")
 
     logger.info("╠══════════════════════════════════════════════╣")
-    logger.info(f"║ Total Posts This Week: 21")
-    logger.info(f"║   • Images:    7")
-    logger.info(f"║   • Reels:     12 (5 days × 2 + 2 days × 1)")
-    logger.info(f"║   • Carousels: 2")
+    logger.info(f"║ Videos: har {VIDEO_EVERY_DAYS} din mein 1 video.")
+    logger.info(f"║ Aaj    : {'🎬 video day' if today_is_video_day else '🖼️ video day nahi'}")
     logger.info("╚══════════════════════════════════════════════╝")
 
 

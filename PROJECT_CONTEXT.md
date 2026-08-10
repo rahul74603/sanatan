@@ -68,10 +68,11 @@ Automatically. Daily. 3 posts/day.
 | Time (IST) | Content Type | Status |
 |---|---|---|
 | **8:00 AM** | Single Premium Image | ✅ Existing (auto_image.yml) |
-| **1:00 PM** | Reel (60-90s video) | 🆕 NEW (auto_reel.yml to create) |
-| **8:00 PM** | Carousel (5 slides) | ✅ Existing (auto_carousel.yml) |
+| **1:00 PM** | Reel (60-90s video) — 🆕 ab har 2 din mein 1 (video day) | auto_reel.yml |
+| **8:00 PM** | Carousel (5 slides) / Reel / Image | ✅ Existing (auto_evening.yml) |
 
-**Total:** 3 posts/day, 21 posts/week
+**V3 Note:** Reels ab daily nahi — har `VIDEO_EVERY_DAYS` (default 2) din mein 1
+video. Non-video day → us slot mein image fallback (kam se kam pic).
 
 ---
 
@@ -340,6 +341,69 @@ STAGES = {
 
 **Extended tables:**
 - category_performance, caption_style_performance, time_slot_performance, hashtag_performance, insights
+
+---
+
+## 🆕 V3 — FREE / PRO / AUTO MODE SYSTEM
+
+> **Purpose:** Budget khatam hone par bhi content rukta nahi. Mode switch karke
+> paid (PRO) aur ₹0 (FREE) ke beech jao. Reel/video fail ho to bhi **kam se kam
+> ek picture (pic) ban hi jati hai.**
+
+### 3 Modes
+| Mode | Images | Reels/Video | Cost |
+|---|---|---|---|
+| **free** | Sirf Pollinations (₹0) | ✅ agar free path ho, warna pic | ₹0 |
+| **pro** | Premium Vertex Imagen | ✅ Enabled (TTS + video) | Paid |
+| **auto** (default) | Pro, budget khatam → free | Video fail → pic fallback | As needed |
+
+### 🎬 VIDEO FREQUENCY — har 2 din mein 1 video
+- Reels ab **daily nahi** — har `VIDEO_EVERY_DAYS` (default **2**) din mein 1 video.
+- **PRO mode** → video day par video bane.
+- **FREE mode** → video sirf tab jab free path possible ho
+  (`FREE_MODE_ALLOWS_VIDEO=true` + video pipeline available). Warna pic.
+- Non-video day → us slot mein image fallback (kam se kam pic).
+- Change karo: `.env` mein `VIDEO_EVERY_DAYS=3` → har 3 din mein 1 video.
+- Decision `core.mode_manager.is_video_day()` / `should_make_video()` se:
+  last video DB date ke baad `VIDEO_EVERY_DAYS` din ho → video day.
+- `core/database.get_todays_content_type()` bhi is rule ko respect karta hai
+  (afternoon/evening ab video day par hi "reel" deta hai).
+
+### Switch karo (persistent, restart ke baad bhi bana rehta hai)
+```bash
+python main.py mode            # status
+python main.py mode free       # ₹0, sirf images
+python main.py mode pro        # paid (premium)
+python main.py mode auto       # pro, budget khatam → free fallback
+```
+
+### .env se bhi set kar sakte ho
+```bash
+APP_MODE=auto                    # free | pro | auto (default auto)
+FREE_MODE_DISABLES_REELS=false   # true → free mode mein video bilkul band
+FREE_MODE_ALLOWS_VIDEO=true      # free mode mein video allow (agar free path ho)
+VIDEO_EVERY_DAYS=2               # har 2 din mein 1 video (default)
+```
+
+### Kya hota hai
+- **FREE mode** → `image_agent` paid Vertex/Imagen bypass karke seedha
+  Pollinations (₹0) use karta hai. Video: `run_reel_pipeline` mein
+  `should_make_video()` — video day + free path ho to video, warna picture.
+- **AUTO mode** → daily/monthly Vertex budget (`VERTEX_DAILY_BUDGET` /
+  `VERTEX_MONTHLY_BUDGET`) exhausted hone par auto FREE mein degrade ho jata
+  hai (budget check `utils/vertex_ai.estimate_images_remaining()` se).
+- **Reel fail fallback** → reel_engine video build fail kare to pipeline crash
+  nahi hoti; uski jagah single-image pipeline chal kar ek picture post ho
+  jati hai (flag `_mode_fallback`).
+- **Video day** → har `VIDEO_EVERY_DAYS` din mein 1 video (`is_video_day()`).
+  Non-video day → image fallback.
+- State `logs/mode_state.json` mein save hoti hai (gitignored).
+
+### Files
+- 🆕 `core/mode_manager.py` — mode logic (get/set, budget check, capability)
+- `config/settings.py` — `APP_MODE`, `MODE_STATE_FILE`, `FREE_MODE_DISABLES_REELS`
+- `agents/image_agent.py` — FREE mode → Pollinations only
+- `main.py` — `mode` CLI + health/cost mode display + reel→image fallback
 
 ---
 
