@@ -264,9 +264,9 @@ YOUTUBE_UPLOAD_MAX_RETRIES = 3
 # CLI se switch करो:  python main.py mode free|pro|auto
 # .env में set करो:   APP_MODE=free  |  APP_MODE=pro  |  APP_MODE=auto
 # ═══════════════════════════════════════════════════════════
-APP_MODE = os.getenv("APP_MODE", "auto").strip().lower()
+APP_MODE = os.getenv("APP_MODE", "free").strip().lower()
 if APP_MODE not in ("free", "pro", "auto"):
-    APP_MODE = "auto"
+    APP_MODE = "free"
 
 # Persistent mode override file (CLI `mode` command से update होता है)
 MODE_STATE_FILE = os.getenv(
@@ -275,16 +275,16 @@ MODE_STATE_FILE = os.getenv(
 )
 
 # FREE mode में video banane ki hard-off flag.
-# V3: Default ab FALSE — kyunki user chahata hai ki FREE mode mein bhi video
-# bane agar free path possible ho (Pollinations free images + ffmpeg render).
-# Isko "true" karne par FREE mode mein video bilkul band → pic fallback.
+# 🆕 FULLY FREE (₹0) — Default TRUE: video/reels band → TTS paisa na lage.
+# Paisa aaye to .env mein FREE_MODE_DISABLES_REELS=false ya GitHub vars se change karo.
 FREE_MODE_DISABLES_REELS = os.getenv(
-    "FREE_MODE_DISABLES_REELS", "false"
+    "FREE_MODE_DISABLES_REELS", "true"
 ).lower() == "true"
 
 # FREE mode mein video banane allow karo (agar free path available ho).
+# 🆕 FULLY FREE (₹0) — Default FALSE: FREE mein video disabled → pic fallback.
 FREE_MODE_ALLOWS_VIDEO = os.getenv(
-    "FREE_MODE_ALLOWS_VIDEO", "true"
+    "FREE_MODE_ALLOWS_VIDEO", "false"
 ).lower() == "true"
 
 # 🎬 VIDEO FREQUENCY — har N din mein 1 video (default: 2 din)

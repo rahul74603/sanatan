@@ -2,10 +2,10 @@
 
 > **PURPOSE:** Ye file complete project context deti hai. Agar AI chat khatam ho jaye ya naye chat mein continue karna ho, to bas ye file paste karo — AI turant sab samajh jayega ki kya already hai, kya banana hai, aur kahan se continue karna hai.
 
-**Last Updated:** [Auto-fill karo jab bhi update karo]  
+**Last Updated:** 2026-08-11 (FULLY FREE ₹0 mode verified + pushed)  
 **Owner:** Rahul  
 **Project Path:** `C:\Users\Rahul\Desktop\सनातन सोच\spiritual-auto-post`  
-**GitHub:** [Add repo URL]
+**GitHub:** https://github.com/rahul74603/sanatan
 
 ---
 
@@ -379,11 +379,12 @@ python main.py mode auto       # pro, budget khatam → free fallback
 
 ### .env se bhi set kar sakte ho
 ```bash
-APP_MODE=auto                    # free | pro | auto (default auto)
-FREE_MODE_DISABLES_REELS=false   # true → free mode mein video bilkul band
-FREE_MODE_ALLOWS_VIDEO=true      # free mode mein video allow (agar free path ho)
+APP_MODE=free                    # free | pro | auto (default free — FULLY FREE ₹0)
+FREE_MODE_DISABLES_REELS=true    # true → free mode mein video bilkul band (₹0)
+FREE_MODE_ALLOWS_VIDEO=false     # false → free mode mein video disabled → pic fallback
 VIDEO_EVERY_DAYS=2               # har 2 din mein 1 video (default)
 ```
+> **2026-08-11 UPDATE — FULLY FREE (₹0) VERIFIED:** Local defaults ab free hain (`config/settings.py` APP_MODE=free, FREE_MODE_DISABLES_REELS=true, FREE_MODE_ALLOWS_VIDEO=false). Teeno workflows (`auto_image/reel/evening`) mein bhi `vars.APP_MODE` fallback free + dropdown default free. `python main.py mode` → FREE (₹0) + `python main.py health` → FREE confirmed. GitHub pe change ke liye repo Variables (`APP_MODE=pro`) ya local `python main.py mode pro`.
 
 ### Kya hota hai
 - **FREE mode** → `image_agent` paid Vertex/Imagen bypass karke seedha
