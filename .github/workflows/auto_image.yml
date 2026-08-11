@@ -5,6 +5,16 @@ on:
     - cron: '30 2 * * *'
 
   workflow_dispatch:
+    inputs:
+      app_mode:
+        description: 'App mode (free=₹0 Pollinations only, pro=paid, auto=budget-based)'
+        required: false
+        default: 'free'
+        type: choice
+        options:
+          - free
+          - pro
+          - auto
 
 jobs:
   post-image:
@@ -62,7 +72,19 @@ jobs:
           YOUTUBE_CLIENT_SECRETS_FILE: sanatani_youtube_client_secrets.json
           YOUTUBE_TOKEN_FILE: sanatani_youtube_token.json
 
+          # 🎛️ FULLY FREE (₹0) MODE — GitHub vars se override kar sakte ho
+          # Repo → Settings → Variables → Actions → New variable:
+          #   APP_MODE=free | pro | auto   (default: free)
+          #   FREE_MODE_DISABLES_REELS=true | false
+          #   FREE_MODE_ALLOWS_VIDEO=true | false
+          # Manual run par dropdown se bhi select kar sakte ho (default: free)
+          APP_MODE: ${{ inputs.app_mode || vars.APP_MODE || 'free' }}
+          FREE_MODE_DISABLES_REELS: ${{ vars.FREE_MODE_DISABLES_REELS || 'true' }}
+          FREE_MODE_ALLOWS_VIDEO: ${{ vars.FREE_MODE_ALLOWS_VIDEO || 'false' }}
+          VIDEO_EVERY_DAYS: ${{ vars.VIDEO_EVERY_DAYS || '2' }}
+
         run: |
+          echo "🎛️  Mode: APP_MODE=$APP_MODE FREE_DISABLES_REELS=$FREE_MODE_DISABLES_REELS FREE_ALLOWS_VIDEO=$FREE_MODE_ALLOWS_VIDEO"
           python main.py image
 
       - name: Upload logs
