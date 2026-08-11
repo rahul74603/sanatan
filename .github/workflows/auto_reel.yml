@@ -5,8 +5,18 @@ on:
     # Daily 1:00 PM IST (7:30 AM UTC)
     - cron: '30 7 * * *'
   
-  # Manual trigger (mobile se run kar sakte ho)
+  # Manual trigger (mobile se run kar sakte ho) — FULLY FREE dropdown
   workflow_dispatch:
+    inputs:
+      app_mode:
+        description: 'App mode (free=₹0 Pollinations only, pro=paid, auto=budget-based)'
+        required: false
+        default: 'free'
+        type: choice
+        options:
+          - free
+          - pro
+          - auto
 
 jobs:
   post-reel:
@@ -77,7 +87,18 @@ jobs:
           YOUTUBE_CHANNEL_ID: ${{ secrets.YOUTUBE_CHANNEL_ID }}
           YOUTUBE_CLIENT_SECRETS_FILE: sanatani_youtube_client_secrets.json
           YOUTUBE_TOKEN_FILE: sanatani_youtube_token.json
+
+          # 🎛️ FULLY FREE (₹0) MODE — GitHub vars se override
+          # Repo → Settings → Variables → Actions:
+          #   APP_MODE=free | pro | auto (default: free)
+          #   FREE_MODE_DISABLES_REELS=true | false (default: true → reels band)
+          #   FREE_MODE_ALLOWS_VIDEO=true | false (default: false → pic fallback)
+          APP_MODE: ${{ inputs.app_mode || vars.APP_MODE || 'free' }}
+          FREE_MODE_DISABLES_REELS: ${{ vars.FREE_MODE_DISABLES_REELS || 'true' }}
+          FREE_MODE_ALLOWS_VIDEO: ${{ vars.FREE_MODE_ALLOWS_VIDEO || 'false' }}
+          VIDEO_EVERY_DAYS: ${{ vars.VIDEO_EVERY_DAYS || '2' }}
         run: |
+          echo "🎛️  Mode: APP_MODE=$APP_MODE FREE_DISABLES_REELS=$FREE_MODE_DISABLES_REELS FREE_ALLOWS_VIDEO=$FREE_MODE_ALLOWS_VIDEO"
           python main.py reel-new
       
       - name: 📊 Upload logs (for debugging if needed)
