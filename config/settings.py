@@ -104,7 +104,7 @@ IMAGE_ASPECT_RATIO = os.getenv("IMAGE_ASPECT_RATIO", "1:1")
 # ═══════════════════════════════════════════════════════════
 # ✅ QUALITY THRESHOLDS
 # ═══════════════════════════════════════════════════════════
-IMAGE_QUALITY_MIN_BYTES = int(os.getenv("IMAGE_QUALITY_MIN_BYTES", "30000"))
+IMAGE_QUALITY_MIN_BYTES = int(os.getenv("IMAGE_QUALITY_MIN_BYTES", "20000"))
 IMAGE_MIN_DIMENSION = int(os.getenv("IMAGE_MIN_DIMENSION", "512"))
 MAX_REGENERATION_ATTEMPTS = int(os.getenv("MAX_REGENERATION_ATTEMPTS", "3"))
 QUALITY_SCORE_THRESHOLD = int(os.getenv("QUALITY_SCORE_THRESHOLD", "60"))
