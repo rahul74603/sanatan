@@ -5,8 +5,18 @@ on:
     # Daily 8:00 PM IST (2:30 PM UTC)
     - cron: '30 14 * * *'
   
-  # Manual trigger
+  # Manual trigger — FULLY FREE dropdown
   workflow_dispatch:
+    inputs:
+      app_mode:
+        description: 'App mode (free=₹0 Pollinations only, pro=paid, auto=budget-based)'
+        required: false
+        default: 'free'
+        type: choice
+        options:
+          - free
+          - pro
+          - auto
 
 jobs:
   post-evening:
@@ -77,7 +87,14 @@ jobs:
           YOUTUBE_CHANNEL_ID: ${{ secrets.YOUTUBE_CHANNEL_ID }}
           YOUTUBE_CLIENT_SECRETS_FILE: sanatani_youtube_client_secrets.json
           YOUTUBE_TOKEN_FILE: sanatani_youtube_token.json
+
+          # 🎛️ FULLY FREE (₹0) MODE — GitHub vars
+          APP_MODE: ${{ inputs.app_mode || vars.APP_MODE || 'free' }}
+          FREE_MODE_DISABLES_REELS: ${{ vars.FREE_MODE_DISABLES_REELS || 'true' }}
+          FREE_MODE_ALLOWS_VIDEO: ${{ vars.FREE_MODE_ALLOWS_VIDEO || 'false' }}
+          VIDEO_EVERY_DAYS: ${{ vars.VIDEO_EVERY_DAYS || '2' }}
         run: |
+          echo "🎛️  Mode: APP_MODE=$APP_MODE FREE_DISABLES_REELS=$FREE_MODE_DISABLES_REELS FREE_ALLOWS_VIDEO=$FREE_MODE_ALLOWS_VIDEO"
           # 🎯 Smart decision: DB checks if today is carousel day
           python main.py evening-smart
       
